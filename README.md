@@ -57,6 +57,23 @@ Docker 部署请参考：
 docker build -t neye-api .
 ```
 
+Dockerfile 默认使用国内源加速：
+
+```text
+APK_MIRROR=mirrors.aliyun.com
+NPM_REGISTRY=https://registry.npmmirror.com
+PNPM_VERSION=9.15.0
+```
+
+如果部署环境在海外，也可以切回官方源：
+
+```powershell
+docker build `
+  --build-arg APK_MIRROR=dl-cdn.alpinelinux.org `
+  --build-arg NPM_REGISTRY=https://registry.npmjs.org `
+  -t neye-api .
+```
+
 运行容器时需要传入环境变量文件：
 
 ```powershell
