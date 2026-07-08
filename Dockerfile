@@ -6,8 +6,8 @@ RUN apk add --no-cache openssl \
   && corepack enable \
   && corepack prepare pnpm@9.15.0 --activate
 
-COPY package.json ./
-RUN pnpm install --no-frozen-lockfile
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
 
 COPY prisma ./prisma
 RUN pnpm prisma:generate
