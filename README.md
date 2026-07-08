@@ -80,4 +80,10 @@ docker build `
 docker run --env-file .env.docker -p 3100:3000 neye-api
 ```
 
+`.env.docker` 使用 Docker env-file 格式，变量值不要加引号。例如：
+
+```text
+DATABASE_URL=postgresql://neye:你的密码@数据库地址:5432/neye?schema=public
+```
+
 不要提交真实 `.env` 或 `.env.docker`。
