@@ -1,0 +1,311 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum TenantStatus {
+  active
+  disabled
+}
+
+enum UserRole {
+  admin
+  staff
+}
+
+enum UserStatus {
+  active
+  disabled
+}
+
+enum Gender {
+  male
+  female
+  unknown
+}
+
+enum ProductItemCategory {
+  frame
+  lens
+  other
+}
+
+enum ImportTaskType {
+  customer_optometry
+}
+
+enum ImportTaskStatus {
+  pending
+  running
+  canceling
+  canceled
+  completed
+  failed
+}
+
+enum ImportTaskRowStatus {
+  pending
+  success
+  failed
+  skipped
+}
+
+model Tenant {
+  id           String       @id @default(uuid()) @db.Uuid
+  code         String       @unique @db.VarChar(32)
+  name         String       @db.VarChar(120)
+  contactName  String?      @map("contact_name") @db.VarChar(80)
+  contactPhone String?      @map("contact_phone") @db.VarChar(32)
+  status       TenantStatus @default(active)
+  createdAt    DateTime     @default(now()) @map("created_at")
+  updatedAt    DateTime     @updatedAt @map("updated_at")
+
+  users           User[]
+  customers       Customer[]
+  optometryOrders OptometryOrder[]
+  fittingOrders   FittingOrder[]
+  importTasks     ImportTask[]
+
+  @@map("tenants")
+}
+
+model User {
+  id           String     @id @default(uuid()) @db.Uuid
+  tenantId     String?    @map("tenant_id") @db.Uuid
+  username     String     @unique @db.VarChar(80)
+  passwordHash String     @map("password_hash") @db.VarChar(255)
+  displayName  String     @map("display_name") @db.VarChar(80)
+  role         UserRole
+  status       UserStatus @default(active)
+  createdAt    DateTime   @default(now()) @map("created_at")
+  updatedAt    DateTime   @updatedAt @map("updated_at")
+
+  tenant Tenant? @relation(fields: [tenantId], references: [id])
+  createdImportTasks ImportTask[] @relation("ImportTaskCreatedBy")
+
+  @@index([tenantId])
+  @@index([role])
+  @@map("users")
+}
+
+model ProductItem {
+  id           String              @id @default(uuid()) @db.Uuid
+  category     ProductItemCategory
+  name         String              @db.VarChar(255)
+  defaultPrice Decimal             @default(0) @map("default_price") @db.Decimal(12, 2)
+  usageCount   Int                 @default(0) @map("usage_count")
+  lastUsedAt   DateTime?           @map("last_used_at")
+  remark       String?             @db.Text
+  createdAt    DateTime            @default(now()) @map("created_at")
+  updatedAt    DateTime            @updatedAt @map("updated_at")
+  deletedAt    DateTime?           @map("deleted_at")
+
+  frameFittingOrders FittingOrder[] @relation("FrameProductItem")
+  lensFittingOrders  FittingOrder[] @relation("LensProductItem")
+  otherFittingOrders FittingOrder[] @relation("OtherProductItem")
+
+  @@index([category, name])
+  @@index([category, usageCount])
+  @@map("product_items")
+}
+
+model Customer {
+  id         String    @id @default(uuid()) @db.Uuid
+  tenantId   String    @map("tenant_id") @db.Uuid
+  customerNo String    @map("customer_no") @db.VarChar(32)
+  name       String    @db.VarChar(80)
+  phone      String?   @db.VarChar(32)
+  gender     Gender    @default(unknown)
+  age        Int?
+  remark     String?   @db.Text
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+  deletedAt  DateTime? @map("deleted_at")
+
+  tenant          Tenant           @relation(fields: [tenantId], references: [id])
+  optometryOrders OptometryOrder[]
+  fittingOrders   FittingOrder[]
+
+  @@unique([tenantId, customerNo])
+  @@index([tenantId, phone])
+  @@index([tenantId, name])
+  @@map("customers")
+}
+
+model OptometryOrder {
+  id            String    @id @default(uuid()) @db.Uuid
+  tenantId      String    @map("tenant_id") @db.Uuid
+  orderNo       String    @map("order_no") @db.VarChar(32)
+  customerId    String    @map("customer_id") @db.Uuid
+  optometryDate DateTime  @map("optometry_date") @db.Date
+  remark        String?   @db.Text
+  farRightSph String? @map("far_right_sph") @db.Text
+  farRightCyl String? @map("far_right_cyl") @db.Text
+  farRightAxis String? @map("far_right_axis") @db.Text
+  farRightPrism String? @map("far_right_prism") @db.Text
+  farRightBase String? @map("far_right_base") @db.Text
+  farRightAdd String? @map("far_right_add") @db.Text
+  farRightBcV String? @map("far_right_bc_v") @db.Text
+  farRightBcH String? @map("far_right_bc_h") @db.Text
+  farRightDia String? @map("far_right_dia") @db.Text
+  farRightUcva String? @map("far_right_ucva") @db.Text
+  farRightBcva String? @map("far_right_bcva") @db.Text
+  farLeftSph String? @map("far_left_sph") @db.Text
+  farLeftCyl String? @map("far_left_cyl") @db.Text
+  farLeftAxis String? @map("far_left_axis") @db.Text
+  farLeftPrism String? @map("far_left_prism") @db.Text
+  farLeftBase String? @map("far_left_base") @db.Text
+  farLeftAdd String? @map("far_left_add") @db.Text
+  farLeftBcV String? @map("far_left_bc_v") @db.Text
+  farLeftBcH String? @map("far_left_bc_h") @db.Text
+  farLeftDia String? @map("far_left_dia") @db.Text
+  farLeftUcva String? @map("far_left_ucva") @db.Text
+  farLeftBcva String? @map("far_left_bcva") @db.Text
+  nearRightSph String? @map("near_right_sph") @db.Text
+  nearRightCyl String? @map("near_right_cyl") @db.Text
+  nearRightAxis String? @map("near_right_axis") @db.Text
+  nearRightPrism String? @map("near_right_prism") @db.Text
+  nearRightBase String? @map("near_right_base") @db.Text
+  nearRightAdd String? @map("near_right_add") @db.Text
+  nearRightBcV String? @map("near_right_bc_v") @db.Text
+  nearRightBcH String? @map("near_right_bc_h") @db.Text
+  nearRightDia String? @map("near_right_dia") @db.Text
+  nearRightUcva String? @map("near_right_ucva") @db.Text
+  nearRightBcva String? @map("near_right_bcva") @db.Text
+  nearLeftSph String? @map("near_left_sph") @db.Text
+  nearLeftCyl String? @map("near_left_cyl") @db.Text
+  nearLeftAxis String? @map("near_left_axis") @db.Text
+  nearLeftPrism String? @map("near_left_prism") @db.Text
+  nearLeftBase String? @map("near_left_base") @db.Text
+  nearLeftAdd String? @map("near_left_add") @db.Text
+  nearLeftBcV String? @map("near_left_bc_v") @db.Text
+  nearLeftBcH String? @map("near_left_bc_h") @db.Text
+  nearLeftDia String? @map("near_left_dia") @db.Text
+  nearLeftUcva String? @map("near_left_ucva") @db.Text
+  nearLeftBcva String? @map("near_left_bcva") @db.Text
+  farPd String? @map("far_pd") @db.Text
+  farRightPd String? @map("far_right_pd") @db.Text
+  farLeftPd String? @map("far_left_pd") @db.Text
+  nearPd String? @map("near_pd") @db.Text
+  rightHeight String? @map("right_height") @db.Text
+  leftHeight String? @map("left_height") @db.Text
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  tenant        Tenant         @relation(fields: [tenantId], references: [id])
+  customer      Customer       @relation(fields: [customerId], references: [id])
+  fittingOrders FittingOrder[]
+
+  @@unique([tenantId, orderNo])
+  @@index([tenantId, customerId, optometryDate])
+  @@map("optometry_orders")
+}
+
+model FittingOrder {
+  id               String    @id @default(uuid()) @db.Uuid
+  tenantId         String    @map("tenant_id") @db.Uuid
+  orderNo          String    @map("order_no") @db.VarChar(32)
+  customerId       String    @map("customer_id") @db.Uuid
+  optometryOrderId String    @map("optometry_order_id") @db.Uuid
+
+  frameProductItemId String?  @map("frame_product_item_id") @db.Uuid
+  frameInfo          String?  @map("frame_info") @db.VarChar(255)
+  framePrice         Decimal  @default(0) @map("frame_price") @db.Decimal(12, 2)
+
+  lensProductItemId String?  @map("lens_product_item_id") @db.Uuid
+  lensInfo          String?  @map("lens_info") @db.VarChar(255)
+  lensPrice         Decimal  @default(0) @map("lens_price") @db.Decimal(12, 2)
+
+  otherProductItemId String?  @map("other_product_item_id") @db.Uuid
+  otherInfo          String?  @map("other_info") @db.VarChar(255)
+  otherPrice         Decimal  @default(0) @map("other_price") @db.Decimal(12, 2)
+
+  totalAmount Decimal   @default(0) @map("total_amount") @db.Decimal(12, 2)
+  remark      String?   @db.Text
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  deletedAt   DateTime? @map("deleted_at")
+
+  tenant           Tenant         @relation(fields: [tenantId], references: [id])
+  customer         Customer       @relation(fields: [customerId], references: [id])
+  optometryOrder   OptometryOrder @relation(fields: [optometryOrderId], references: [id])
+  frameProductItem ProductItem?   @relation("FrameProductItem", fields: [frameProductItemId], references: [id])
+  lensProductItem  ProductItem?   @relation("LensProductItem", fields: [lensProductItemId], references: [id])
+  otherProductItem ProductItem?   @relation("OtherProductItem", fields: [otherProductItemId], references: [id])
+
+  @@unique([tenantId, orderNo])
+  @@index([tenantId, customerId])
+  @@index([tenantId, optometryOrderId])
+  @@index([tenantId, frameProductItemId])
+  @@index([tenantId, lensProductItemId])
+  @@index([tenantId, otherProductItemId])
+  @@map("fitting_orders")
+}
+model ImportTask {
+  id                String           @id @default(uuid()) @db.Uuid
+  tenantId          String           @map("tenant_id") @db.Uuid
+  createdById       String           @map("created_by_id") @db.Uuid
+  type              ImportTaskType   @default(customer_optometry)
+  status            ImportTaskStatus @default(pending)
+  fileName          String           @map("file_name") @db.VarChar(255)
+  totalRows         Int              @default(0) @map("total_rows")
+  processedRows     Int              @default(0) @map("processed_rows")
+  successRows       Int              @default(0) @map("success_rows")
+  failedRows        Int              @default(0) @map("failed_rows")
+  errorMessage      String?          @map("error_message") @db.Text
+  startedAt         DateTime?        @map("started_at")
+  finishedAt        DateTime?        @map("finished_at")
+  cancelRequestedAt DateTime?        @map("cancel_requested_at")
+  rolledBackAt      DateTime?        @map("rolled_back_at")
+  rollbackCustomers Int              @default(0) @map("rollback_customers")
+  rollbackOptometryOrders Int        @default(0) @map("rollback_optometry_orders")
+  rollbackFittingOrders Int          @default(0) @map("rollback_fitting_orders")
+  deletedAt         DateTime?        @map("deleted_at")
+  createdAt         DateTime         @default(now()) @map("created_at")
+  updatedAt         DateTime         @updatedAt @map("updated_at")
+
+  tenant    Tenant          @relation(fields: [tenantId], references: [id])
+  createdBy User            @relation("ImportTaskCreatedBy", fields: [createdById], references: [id])
+  rows      ImportTaskRow[]
+
+  @@index([tenantId, status, createdAt])
+  @@index([createdById])
+  @@map("import_tasks")
+}
+
+model ImportTaskRow {
+  id                String              @id @default(uuid()) @db.Uuid
+  taskId            String              @map("task_id") @db.Uuid
+  rowNo             Int                 @map("row_no")
+  importCustomerNo  String?             @map("import_customer_no") @db.VarChar(80)
+  status            ImportTaskRowStatus @default(pending)
+  customerId        String?             @map("customer_id") @db.Uuid
+  optometryOrderId  String?             @map("optometry_order_id") @db.Uuid
+  errorMessage      String?             @map("error_message") @db.Text
+  rawData           Json?               @map("raw_data")
+  createdAt         DateTime            @default(now()) @map("created_at")
+  updatedAt         DateTime            @updatedAt @map("updated_at")
+
+  task ImportTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@unique([taskId, rowNo])
+  @@index([taskId, status])
+  @@index([importCustomerNo])
+  @@map("import_task_rows")
+}
+
+model SystemSetting {
+  id        String   @id @default(uuid()) @db.Uuid
+  key       String   @unique @db.VarChar(80)
+  value     Json
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("system_settings")
+}
