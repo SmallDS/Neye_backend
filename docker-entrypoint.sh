@@ -6,7 +6,12 @@ if [ "${RUN_DB_MIGRATIONS:-false}" = "true" ]; then
   pnpm prisma migrate deploy
 elif [ "${RUN_DB_PUSH:-true}" = "true" ]; then
   echo "[neye-api] syncing database schema with prisma db push"
-  pnpm prisma db push
+  if [ "${RUN_DB_PUSH_ACCEPT_DATA_LOSS:-false}" = "true" ]; then
+    echo "[neye-api] prisma data-loss warnings are explicitly accepted"
+    pnpm prisma db push --accept-data-loss
+  else
+    pnpm prisma db push
+  fi
 else
   echo "[neye-api] database schema sync skipped"
 fi

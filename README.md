@@ -61,6 +61,7 @@
 | --- | --- | --- |
 | RUN_DB_MIGRATIONS | false | 执行 prisma migrate deploy |
 | RUN_DB_PUSH | true | 执行 prisma db push |
+| RUN_DB_PUSH_ACCEPT_DATA_LOSS | false | 已审查 Prisma 警告后，临时允许 db push 继续；升级成功后关闭 |
 | RUN_DB_SEED | false | 执行管理员种子数据 |
 | RUN_CUSTOMER_PINYIN_BACKFILL | true | 自动补齐历史客户的姓名拼音和首字母 |
 | RUN_USER_TENANT_BACKFILL | true | 自动把旧版账号租户关系回填到成员表 |
