@@ -347,8 +347,9 @@ describe('NEye MVP API e2e', () => {
       const updatedWechatConfig = await requestJson<{
         enabled: boolean;
         appId: string;
+        appSecret: string;
+        envVersion: string;
         secretConfigured: boolean;
-        secretSource: string;
       }>('/system-settings/wechat-auth', {
         method: 'PATCH',
         token: systemLogin.accessToken,
@@ -356,24 +357,36 @@ describe('NEye MVP API e2e', () => {
           enabled: false,
           appId: 'wx-e2e-app-id',
           appSecret: testWechatSecret,
+          envVersion: 'develop',
         },
       });
       expect(updatedWechatConfig).toEqual({
         enabled: false,
         appId: 'wx-e2e-app-id',
+        appSecret: testWechatSecret,
+        envVersion: 'develop',
         secretConfigured: true,
-        secretSource: 'database',
       });
 
       const storedWechatSetting = await prisma.systemSetting.findUniqueOrThrow({
         where: { key: 'wechat_auth' },
       });
       const storedWechatValue = storedWechatSetting.value as {
-        encryptedSecret?: string;
+        appSecret?: string;
+        envVersion?: string;
       };
-      expect(storedWechatValue.encryptedSecret).toMatch(/^v1:/);
-      expect(storedWechatValue.encryptedSecret).not.toContain(testWechatSecret);
-      expect(JSON.stringify(updatedWechatConfig)).not.toContain(testWechatSecret);
+      expect(storedWechatValue.appSecret).toBe(testWechatSecret);
+      expect(storedWechatValue.envVersion).toBe('develop');
+
+      const refreshedPublicWechatConfig = await requestJson<{
+        enabled: boolean;
+        appId: string;
+        secretConfigured: boolean;
+      }>('/auth/wechat/config');
+      expect(refreshedPublicWechatConfig.secretConfigured).toBe(true);
+      expect(JSON.stringify(refreshedPublicWechatConfig)).not.toContain(
+        testWechatSecret,
+      );
     } finally {
       if (originalWechatSetting) {
         await prisma.systemSetting.update({

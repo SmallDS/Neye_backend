@@ -1,5 +1,6 @@
 import {
   IsBoolean,
+  IsIn,
   IsOptional,
   IsString,
   MaxLength,
@@ -20,6 +21,10 @@ export class UpdateWechatAuthDto {
   @MinLength(8)
   @MaxLength(128)
   appSecret?: string;
+
+  @IsOptional()
+  @IsIn(['release', 'trial', 'develop'])
+  envVersion?: 'develop' | 'release' | 'trial';
 
   @IsOptional()
   @IsBoolean()

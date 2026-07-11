@@ -20,7 +20,6 @@ import * as bcrypt from 'bcryptjs';
 import { randomBytes } from 'crypto';
 import { CurrentUser } from '../common/types/current-user';
 import { PrismaService } from '../prisma/prisma.service';
-import { decryptSettingSecret } from '../system-settings/secret-crypto';
 import { AuthService } from './auth.service';
 import { WechatBindAccountDto } from './dto/wechat-bind-account.dto';
 import { WechatMiniLoginDto } from './dto/wechat-mini-login.dto';
@@ -224,7 +223,12 @@ export class WechatAuthService {
       },
     });
     try {
-      const qrCodeDataUrl = await this.createMiniappQrCode(config.appId, config.secret, scene);
+      const qrCodeDataUrl = await this.createMiniappQrCode(
+        config.appId,
+        config.secret,
+        config.envVersion,
+        scene,
+      );
       return {
         id: session.id,
         status: session.status,
@@ -252,7 +256,12 @@ export class WechatAuthService {
     return { appId: config.appId, openId: body.openid };
   }
 
-  private async createMiniappQrCode(appId: string, secret: string, scene: string) {
+  private async createMiniappQrCode(
+    appId: string,
+    secret: string,
+    envVersion: 'develop' | 'release' | 'trial',
+    scene: string,
+  ) {
     const accessToken = await this.getAccessToken(appId, secret);
     const response = await fetch(
       `https://api.weixin.qq.com/wxa/getwxacodeunlimit?access_token=${encodeURIComponent(accessToken)}`,
@@ -263,7 +272,7 @@ export class WechatAuthService {
           scene,
           page: 'pages/login/index',
           check_path: false,
-          env_version: this.wechatEnvVersion(),
+          env_version: envVersion,
           width: 280,
         }),
       },
@@ -357,7 +366,11 @@ export class WechatAuthService {
     if (!config.appId || !config.secret) {
       throw new ServiceUnavailableException('Wechat mini program credentials are not configured');
     }
-    return { appId: config.appId, secret: config.secret };
+    return {
+      appId: config.appId,
+      secret: config.secret,
+      envVersion: config.envVersion,
+    };
   }
 
   private async getConfig() {
@@ -365,35 +378,18 @@ export class WechatAuthService {
       where: { key: WECHAT_AUTH_KEY },
     });
     const value = (setting?.value ?? {}) as Record<string, unknown>;
-    let databaseSecret = '';
-    if (
-      typeof value.encryptedSecret === 'string' &&
-      value.encryptedSecret.length > 0
-    ) {
-      try {
-        databaseSecret = decryptSettingSecret(value.encryptedSecret);
-      } catch {
-        throw new ServiceUnavailableException(
-          'Wechat AppSecret cannot be decrypted; check SETTINGS_ENCRYPTION_KEY',
-        );
-      }
-    }
+    const envVersion: 'develop' | 'release' | 'trial' =
+      value.envVersion === 'develop' || value.envVersion === 'trial'
+        ? value.envVersion
+        : 'release';
     return {
       enabled: value.enabled === true,
-      appId:
-        typeof value.appId === 'string' && value.appId.trim()
-          ? value.appId.trim()
-          : (process.env.WECHAT_MINIAPP_APP_ID ?? ''),
+      appId: typeof value.appId === 'string' ? value.appId.trim() : '',
       secret:
-        databaseSecret || process.env.WECHAT_MINIAPP_APP_SECRET || '',
+        typeof value.appSecret === 'string' ? value.appSecret.trim() : '',
+      envVersion,
     };
   }
-
-  private wechatEnvVersion() {
-    const value = process.env.WECHAT_MINIAPP_ENV_VERSION;
-    return value === 'develop' || value === 'trial' || value === 'release' ? value : 'release';
-  }
-
   private isTerminal(status: WechatLoginSessionStatus) {
     return status === WechatLoginSessionStatus.consumed || status === WechatLoginSessionStatus.expired;
   }

@@ -1,7 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { encryptSettingSecret } from './secret-crypto';
 
 const OPTOMETRY_STYLE_KEY = 'optometry_style';
 const WECHAT_AUTH_KEY = 'wechat_auth';
@@ -25,10 +24,13 @@ const DEFAULT_OPTOMETRY_STYLE = {
   showRemark: true,
 };
 
+type WechatEnvVersion = 'develop' | 'release' | 'trial';
+
 interface WechatAuthSettingValue {
   enabled?: boolean;
   appId?: string;
-  encryptedSecret?: string;
+  appSecret?: string;
+  envVersion?: WechatEnvVersion;
 }
 
 @Injectable()
@@ -37,23 +39,12 @@ export class SystemSettingsService {
 
   async getWechatAuth() {
     const value = await this.getWechatAuthValue();
-    const databaseSecretConfigured = Boolean(value.encryptedSecret);
-    const environmentSecretConfigured = Boolean(
-      process.env.WECHAT_MINIAPP_APP_SECRET,
-    );
     return {
       enabled: value.enabled === true,
-      appId:
-        typeof value.appId === 'string' && value.appId.trim()
-          ? value.appId.trim()
-          : (process.env.WECHAT_MINIAPP_APP_ID ?? ''),
-      secretConfigured:
-        databaseSecretConfigured || environmentSecretConfigured,
-      secretSource: databaseSecretConfigured
-        ? 'database'
-        : environmentSecretConfigured
-          ? 'environment'
-          : 'none',
+      appId: value.appId?.trim() ?? '',
+      envVersion: this.normalizeEnvVersion(value.envVersion),
+      appSecret: value.appSecret ?? '',
+      secretConfigured: Boolean(value.appSecret),
     };
   }
 
@@ -62,20 +53,22 @@ export class SystemSettingsService {
     appSecret?: string;
     clearSecret?: boolean;
     enabled: boolean;
+    envVersion?: WechatEnvVersion;
   }) {
     const current = await this.getWechatAuthValue();
-    let encryptedSecret = current.encryptedSecret;
+    let appSecret = current.appSecret;
 
     if (value.clearSecret === true) {
-      encryptedSecret = undefined;
+      appSecret = undefined;
     } else if (value.appSecret?.trim()) {
-      encryptedSecret = encryptSettingSecret(value.appSecret.trim());
+      appSecret = value.appSecret.trim();
     }
 
     const normalized: WechatAuthSettingValue = {
       enabled: value.enabled,
       appId: value.appId?.trim() ?? '',
-      ...(encryptedSecret ? { encryptedSecret } : {}),
+      envVersion: this.normalizeEnvVersion(value.envVersion),
+      ...(appSecret ? { appSecret } : {}),
     };
     await this.prisma.systemSetting.upsert({
       where: { key: WECHAT_AUTH_KEY },
@@ -115,6 +108,10 @@ export class SystemSettingsService {
       where: { key: WECHAT_AUTH_KEY },
     });
     return (setting?.value ?? {}) as WechatAuthSettingValue;
+  }
+
+  private normalizeEnvVersion(value?: string): WechatEnvVersion {
+    return value === 'develop' || value === 'trial' ? value : 'release';
   }
 
   private normalizeOptometryStyle(value: Record<string, unknown>) {
