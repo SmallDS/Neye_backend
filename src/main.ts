@@ -4,11 +4,26 @@ import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module';
 
+function configuredCorsOrigins() {
+  return (process.env.CORS_ORIGINS ?? '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+}
+
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
+  const corsOrigins = configuredCorsOrigins();
+  if (process.env.NODE_ENV === 'production' && corsOrigins.length === 0) {
+    throw new Error('CORS_ORIGINS is required in production');
+  }
+
   app.setGlobalPrefix('api');
-  app.enableCors({ origin: true, credentials: true });
+  app.enableCors({
+    origin: corsOrigins.length > 0 ? corsOrigins : true,
+    credentials: true,
+  });
   app.useGlobalPipes(
     new ValidationPipe({
       transform: true,

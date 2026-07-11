@@ -1,13 +1,20 @@
-import { IsString, MinLength } from 'class-validator';
+import { IsOptional, IsString, IsUUID, MinLength } from 'class-validator';
 
 export class CreateTenantUserDto {
-  @IsString()
-  username!: string;
+  @IsOptional()
+  @IsUUID('4')
+  userId?: string;
 
+  @IsOptional()
+  @IsString()
+  username?: string;
+
+  @IsOptional()
   @IsString()
   @MinLength(6)
-  password!: string;
+  password?: string;
 
+  @IsOptional()
   @IsString()
-  displayName!: string;
+  displayName?: string;
 }

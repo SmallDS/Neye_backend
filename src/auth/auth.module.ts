@@ -2,6 +2,7 @@ import { Global, Module } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
+import { WechatAuthService } from './wechat-auth.service';
 
 const jwtSecret = process.env.JWT_SECRET;
 if (process.env.NODE_ENV === 'production' && (!jwtSecret || /dev-only|change-me/i.test(jwtSecret))) {
@@ -17,7 +18,7 @@ if (process.env.NODE_ENV === 'production' && (!jwtSecret || /dev-only|change-me/
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService],
+  providers: [AuthService, WechatAuthService],
   exports: [JwtModule],
 })
 export class AuthModule {}

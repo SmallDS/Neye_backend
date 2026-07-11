@@ -3,9 +3,13 @@ import { Prisma } from '@prisma/client';
 import { BatchDeleteDto } from '../common/dto/batch-delete.dto';
 import { toPageResult } from '../common/dto/page.dto';
 import { createOrderNo } from '../common/order-number';
-import { tenantFilter, requireTenantId } from '../common/tenant-scope';
+import { requireTenantId, tenantFilter } from '../common/tenant-scope';
 import { CurrentUser } from '../common/types/current-user';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  buildCustomerNameSearchFields,
+  normalizeCustomerPinyinKeyword,
+} from './customer-name-search';
 import { CreateCustomerDto } from './dto/create-customer.dto';
 import { CustomerQueryDto } from './dto/customer-query.dto';
 import { UpdateCustomerDto } from './dto/update-customer.dto';
@@ -15,19 +19,29 @@ export class CustomersService {
   constructor(private readonly prisma: PrismaService) {}
 
   async list(user: CurrentUser, query: CustomerQueryDto) {
+    const keyword = query.keyword?.trim();
+    const pinyinKeyword = keyword ? normalizeCustomerPinyinKeyword(keyword) : '';
+    const searchConditions: Prisma.CustomerWhereInput[] = keyword
+      ? [
+          { name: { contains: keyword } },
+          { phone: { contains: keyword } },
+          { customerNo: { contains: keyword } },
+        ]
+      : [];
+
+    if (pinyinKeyword) {
+      searchConditions.push(
+        { namePinyin: { startsWith: pinyinKeyword } },
+        { nameInitials: { startsWith: pinyinKeyword } },
+      );
+    }
+
     const where: Prisma.CustomerWhereInput = {
       ...tenantFilter(user, query.tenantId),
       deletedAt: null,
-      ...(query.keyword
-        ? {
-            OR: [
-              { name: { contains: query.keyword } },
-              { phone: { contains: query.keyword } },
-              { customerNo: { contains: query.keyword } },
-            ],
-          }
-        : {}),
+      ...(searchConditions.length > 0 ? { OR: searchConditions } : {}),
     };
+
     const [items, total] = await this.prisma.$transaction([
       this.prisma.customer.findMany({
         where,
@@ -47,6 +61,7 @@ export class CustomersService {
         tenantId,
         customerNo: createOrderNo('C'),
         name: dto.name,
+        ...buildCustomerNameSearchFields(dto.name),
         phone: dto.phone,
         gender: dto.gender,
         age: dto.age,
@@ -78,7 +93,13 @@ export class CustomersService {
   async update(user: CurrentUser, id: string, dto: UpdateCustomerDto) {
     await this.get(user, id);
     const { tenantId: _tenantId, ...data } = dto;
-    return this.prisma.customer.update({ where: { id }, data });
+    return this.prisma.customer.update({
+      where: { id },
+      data: {
+        ...data,
+        ...(dto.name === undefined ? {} : buildCustomerNameSearchFields(dto.name)),
+      },
+    });
   }
 
   async remove(user: CurrentUser, id: string) {

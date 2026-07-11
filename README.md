@@ -1,89 +1,91 @@
 # NEye Backend API
 
-NEye 后端服务，基于 NestJS + Prisma + PostgreSQL。
-
-## 目录
-
-```text
-backend/api
-  prisma/      数据模型、迁移、种子脚本
-  src/         NestJS API 源码
-  test/        接口测试
-  Dockerfile   后端容器构建文件
-```
+基于 NestJS、Prisma 和 PostgreSQL 的多租户 API。
 
 ## 本地开发
 
-复制环境变量样例：
+    Copy-Item .env.example .env
+    pnpm install
+    pnpm prisma:generate
+    pnpm db:push
+    pnpm db:seed
+    pnpm dev
 
-```powershell
-Copy-Item .env.example .env
-```
+主要环境变量：
 
-安装依赖并启动：
+| 变量 | 说明 |
+| --- | --- |
+| DATABASE_URL | PostgreSQL 连接地址 |
+| JWT_SECRET | JWT 签名密钥，生产环境必须使用强随机值 |
+| JWT_EXPIRES_IN | Token 有效期，默认 12h |
+| CORS_ORIGINS | 允许访问 API 的 Web Origin，多个值使用逗号分隔 |
+| PORT | API 监听端口 |
 
-```powershell
-pnpm install
-pnpm prisma:generate
-pnpm db:push
-pnpm db:seed
-pnpm dev
-```
+生产环境没有配置 CORS_ORIGINS 时，API 会拒绝启动，避免意外允许任意网站跨域访问。
 
-默认接口：
+## 账号、权限与租户
 
-```text
-http://127.0.0.1:3100/api
-http://127.0.0.1:3100/api/docs
-```
+- 账号独立存储，通过 user_tenants 成员关系分配到零个、一个或多个租户。
+- admin 拥有全系统权限，不需要租户分配；staff 只能访问已分配且启用的租户。
+- 多租户账号通过 X-Tenant-Id 请求头选择当前租户，后端会逐次验证成员关系。
+- 未分配租户的普通账号可以登录个人中心，但不能访问客户、验光单和配镜单。
+- 删除租户会删除其业务数据与账号分配关系，不会删除独立账号。
+- 客户、验光单和配镜单使用复合租户外键，防止跨租户错误关联。
+- 商品字典全局共享：所有登录用户可查询，只有 admin 可以手工新增、编辑和删除。
+- staff 保存配镜单时仍可自动沉淀新的商品字典项。
 
-如果本地端口要用 3100，请在 `.env` 中设置：
+旧版 users.tenant_id 暂时作为迁移字段保留，历史账号可执行以下命令回填成员关系：
 
-```text
-PORT=3100
-```
+    pnpm db:backfill-user-tenants
 
+## 客户拼音查询
+
+客户姓名会在新建、改名和导入时自动生成完整拼音与首字母，客户列表的 `keyword` 同时支持姓名、完整拼音、拼音首字母、手机号和客户编号。
+
+历史客户可手动回填：
+
+    pnpm db:backfill-customer-pinyin
+
+容器在数据库结构同步后默认自动执行增量回填；已经生成拼音的客户不会重复更新。
+## 客户与验光单导入
+
+导入模板包含可选的“客户创建时间”列，用于保留历史客户档案时间。建议格式为 `YYYY-MM-DD HH:mm:ss`；同一客户有多张验光单时，系统取该客户编号第一次出现的非空创建时间。字段为空或无法识别不会中断导入，客户创建时间自动使用实际导入时间。
 ## Docker
 
-Docker 部署请参考：
+    docker build -t neye-api .
+    docker run --env-file .env.docker -p 3100:3000 neye-api
 
-```text
-.env.docker.example
-```
+启动开关：
 
-构建镜像：
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| RUN_DB_MIGRATIONS | false | 执行 prisma migrate deploy |
+| RUN_DB_PUSH | true | 执行 prisma db push |
+| RUN_DB_SEED | false | 执行管理员种子数据 |
+| RUN_CUSTOMER_PINYIN_BACKFILL | true | 自动补齐历史客户的姓名拼音和首字母 |
+| RUN_USER_TENANT_BACKFILL | true | 自动把旧版账号租户关系回填到成员表 |
 
-```powershell
-docker build -t neye-api .
-```
+当前已有数据库由 db push 创建，迁移目录缺少原始建表基线。在完成生产数据库 baseline 前，保持 RUN_DB_MIGRATIONS=false。新部署默认不会重复执行 seed。
 
-Dockerfile 默认使用国内源加速：
+## 验证
 
-```text
-APK_MIRROR=mirrors.aliyun.com
-NPM_REGISTRY=https://registry.npmmirror.com
-PNPM_VERSION=9.15.0
-```
+    pnpm prisma validate
+    pnpm prisma:generate
+    pnpm typecheck
+    pnpm test
+    pnpm build
 
-如果部署环境在海外，也可以切回官方源：
+pnpm test 会连接测试配置中的 PostgreSQL 并创建临时 E2E 数据，确认数据库地址后再执行。
+## 微信登录与扫码登录
 
-```powershell
-docker build `
-  --build-arg APK_MIRROR=dl-cdn.alpinelinux.org `
-  --build-arg NPM_REGISTRY=https://registry.npmjs.org `
-  -t neye-api .
-```
+微信登录默认关闭。管理员可以在 Web 的“系统管理 > 微信小程序设置”中填写 AppID 和 AppSecret，并启用微信登录。
 
-运行容器时需要传入环境变量文件：
+- AppSecret 使用 AES-256-GCM 加密后存入 system_settings，接口和页面均不会回显明文。
+- SETTINGS_ENCRYPTION_KEY 用于派生数据库配置加密密钥；未配置时兼容使用 JWT_SECRET。生产环境建议配置独立强随机值并妥善备份。
+- 修改 SETTINGS_ENCRYPTION_KEY 或 JWT_SECRET 前，应先记录并重新保存 AppSecret，否则历史密文无法解密。
+- 原有 WECHAT_MINIAPP_APP_ID 和 WECHAT_MINIAPP_APP_SECRET 环境变量仍作为兼容回退配置。
+- WECHAT_MINIAPP_ENV_VERSION 可取 release、trial 或 develop，用于决定扫码打开正式版、体验版或开发版小程序。
+- manifest.json、Web 设置和微信公众平台中的 AppID 必须一致。
+- API 的 HTTPS 域名必须加入微信小程序 request 合法域名。
 
-```powershell
-docker run --env-file .env.docker -p 3100:3000 neye-api
-```
-
-`.env.docker` 使用 Docker env-file 格式，变量值不要加引号。例如：
-
-```text
-DATABASE_URL=postgresql://neye:你的密码@数据库地址:5432/neye?schema=public
-```
-
-不要提交真实 `.env` 或 `.env.docker`。
+系统仅保存 openid 与系统账号的绑定关系，不保存微信昵称、头像、手机号等资料。扫码会话两分钟过期，登录结果只能消费一次。

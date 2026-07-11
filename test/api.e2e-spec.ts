@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
-import { PrismaClient, UserRole } from '@prisma/client';
+import { Prisma, PrismaClient, UserRole } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
 import * as XLSX from 'xlsx';
 import type { AddressInfo } from 'node:net';
@@ -9,7 +9,19 @@ import { AppModule } from '../src/app.module';
 
 interface LoginResponse {
   accessToken: string;
-  user: { id: string; tenantId?: string | null; role: string };
+  user: { id: string; tenantId?: string | null; tenantIds: string[]; role: string };
+}
+
+interface CurrentUserResponse {
+  id: string;
+  tenantId?: string | null;
+  username: string;
+  displayName: string;
+  role: string;
+  tenantIds: string[];
+  tenant?: { id: string; code: string; name: string };
+  tenants: Array<{ id: string; code: string; name: string; status: string }>;
+  wechatBound: boolean;
 }
 
 interface PageResponse<T> {
@@ -27,7 +39,10 @@ interface CustomerResponse {
   id: string;
   tenantId: string;
   name: string;
+  namePinyin?: string | null;
+  nameInitials?: string | null;
   phone?: string | null;
+  createdAt: string;
 }
 
 interface OptometryOrderResponse {
@@ -72,6 +87,15 @@ interface TenantUserResponse {
   displayName: string;
   role: string;
   status: string;
+}
+
+interface AccountResponse {
+  id: string;
+  username: string;
+  displayName: string;
+  role: string;
+  status: string;
+  tenants: Array<{ id: string; name: string }>;
 }
 
 interface BatchDeleteResponse {
@@ -135,7 +159,7 @@ describe('NEye MVP API e2e', () => {
 
   async function requestJson<T>(
     path: string,
-    options: { body?: unknown; method?: string; token?: string } = {},
+    options: { body?: unknown; method?: string; tenantId?: string; token?: string } = {},
     expectedStatus: number | number[] = [200, 201],
   ): Promise<T> {
     const expected = Array.isArray(expectedStatus) ? expectedStatus : [expectedStatus];
@@ -144,6 +168,7 @@ describe('NEye MVP API e2e', () => {
       headers: {
         ...(options.body === undefined ? {} : { 'Content-Type': 'application/json' }),
         ...(options.token ? { Authorization: `Bearer ${options.token}` } : {}),
+        ...(options.tenantId ? { 'X-Tenant-Id': options.tenantId } : {}),
       },
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
     });
@@ -163,7 +188,7 @@ describe('NEye MVP API e2e', () => {
   }
   async function requestBinary(
     path: string,
-    options: { method?: string; token?: string } = {},
+    options: { method?: string; tenantId?: string; token?: string } = {},
     expectedStatus: number | number[] = [200, 201],
   ): Promise<ArrayBuffer> {
     const expected = Array.isArray(expectedStatus) ? expectedStatus : [expectedStatus];
@@ -171,6 +196,7 @@ describe('NEye MVP API e2e', () => {
       method: options.method ?? 'GET',
       headers: {
         ...(options.token ? { Authorization: `Bearer ${options.token}` } : {}),
+        ...(options.tenantId ? { 'X-Tenant-Id': options.tenantId } : {}),
       },
     });
     const body = await response.arrayBuffer();
@@ -183,7 +209,7 @@ describe('NEye MVP API e2e', () => {
   async function requestForm<T>(
     path: string,
     formData: FormData,
-    options: { method?: string; token?: string } = {},
+    options: { method?: string; tenantId?: string; token?: string } = {},
     expectedStatus: number | number[] = [200, 201],
   ): Promise<T> {
     const expected = Array.isArray(expectedStatus) ? expectedStatus : [expectedStatus];
@@ -191,6 +217,7 @@ describe('NEye MVP API e2e', () => {
       method: options.method ?? 'POST',
       headers: {
         ...(options.token ? { Authorization: `Bearer ${options.token}` } : {}),
+        ...(options.tenantId ? { 'X-Tenant-Id': options.tenantId } : {}),
       },
       body: formData,
     });
@@ -204,7 +231,7 @@ describe('NEye MVP API e2e', () => {
 
   function createCustomerOptometryWorkbook() {
     const headers = [
-      '客户导入编号', '客户姓名', '手机号', '性别', '年龄', '客户备注', '验光日期',
+      '客户导入编号', '客户姓名', '手机号', '性别', '年龄', '客户备注', '客户创建时间', '验光日期',
       '远用右眼球光', '远用右眼散光', '远用右眼轴线', '远用右眼加光',
       '远用左眼球光', '远用左眼散光', '远用左眼轴线', '远用左眼加光',
       '近用右眼球光', '近用右眼加光', '近用左眼球光', '近用左眼加光',
@@ -213,10 +240,10 @@ describe('NEye MVP API e2e', () => {
     const workbook = XLSX.utils.book_new();
     const rows = [
       headers,
-      [`IMP-C001-${suffix}`, `E2E Import Customer ${suffix}`, '13600000001', '男', 28, '导入客户', '2026-07-01', '-1.00', '', '', '', '-1.25', '', '', '', '', '', '', '', '62', '31', '31', '', '18', '18', '第一次导入'],
-      [`IMP-C001-${suffix}`, '', '', '', '', '', '2026-07-02', '-1.50', '', '', '', '-1.75', '', '', '', '', '', '', '', '62.5', '31.25', '31.25', '', '', '', '同一客户第二张验光单'],
-      [`IMP-C002-${suffix}`, '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '1.50', '', '1.50', '', '', '', '58', '', '', '姓名与日期为空'],
-      [`IMP-C003-${suffix}`, `E2E Import Tolerant ${suffix}`, '', '', '28 years', 'tolerant raw', 'bad-date', '+2.50D', 'DS', 'RK', 'PRA', '-PL', '-8..25', '90+', '60-61', 'ADD', 'VIP', 'PL', '1/2', 'PD 62mm', '31mm', '31mm', '58mm', '18mm', '18mm', 'raw optometry import'],
+      [`IMP-C001-${suffix}`, `E2E Import Customer ${suffix}`, '13600000001', '男', 28, '导入客户', '2020-03-04 05:06:07', '2026-07-01', '-1.00', '', '', '', '-1.25', '', '', '', '', '', '', '', '62', '31', '31', '', '18', '18', '第一次导入'],
+      [`IMP-C001-${suffix}`, '', '', '', '', '', '', '2026-07-02', '-1.50', '', '', '', '-1.75', '', '', '', '', '', '', '', '62.5', '31.25', '31.25', '', '', '', '同一客户第二张验光单'],
+      [`IMP-C002-${suffix}`, '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '1.50', '', '1.50', '', '', '', '58', '', '', '姓名与日期为空'],
+      [`IMP-C003-${suffix}`, `E2E Import Tolerant ${suffix}`, '', '', '28 years', 'tolerant raw', 'not-a-date', 'bad-date', '+2.50D', 'DS', 'RK', 'PRA', '-PL', '-8..25', '90+', '60-61', 'ADD', 'VIP', 'PL', '1/2', 'PD 62mm', '31mm', '31mm', '58mm', '18mm', '18mm', 'raw optometry import'],
     ];
     XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(rows), '导入模板');
     return XLSX.write(workbook, { bookType: 'xlsx', type: 'buffer' }) as Buffer;
@@ -288,6 +315,125 @@ describe('NEye MVP API e2e', () => {
     const systemLogin = await login(systemUsername, systemPassword);
     expect(systemLogin.user.role).toBe('admin');
 
+    const initialProfile = await requestJson<CurrentUserResponse>('/auth/me', {
+      token: systemLogin.accessToken,
+    });
+    expect(initialProfile.username).toBe(systemUsername);
+    expect(initialProfile.displayName).toBe('E2E Admin');
+    expect(initialProfile.tenantId).toBeNull();
+    expect(initialProfile.wechatBound).toBe(false);
+
+    const publicWechatConfig = await requestJson<{
+      enabled: boolean;
+      appId: string;
+      secretConfigured: boolean;
+    }>('/auth/wechat/config');
+    expect(typeof publicWechatConfig.enabled).toBe('boolean');
+    expect(typeof publicWechatConfig.appId).toBe('string');
+    expect(typeof publicWechatConfig.secretConfigured).toBe('boolean');
+    await requestJson('/system-settings/wechat-auth', {}, 401);
+    const adminWechatConfig = await requestJson<{
+      enabled: boolean;
+      appId: string;
+      secretConfigured: boolean;
+    }>('/system-settings/wechat-auth', { token: systemLogin.accessToken });
+    expect(adminWechatConfig).toMatchObject(publicWechatConfig);
+
+    const originalWechatSetting = await prisma.systemSetting.findUnique({
+      where: { key: 'wechat_auth' },
+    });
+    const testWechatSecret = 'e2e-wechat-secret-' + suffix;
+    try {
+      const updatedWechatConfig = await requestJson<{
+        enabled: boolean;
+        appId: string;
+        secretConfigured: boolean;
+        secretSource: string;
+      }>('/system-settings/wechat-auth', {
+        method: 'PATCH',
+        token: systemLogin.accessToken,
+        body: {
+          enabled: false,
+          appId: 'wx-e2e-app-id',
+          appSecret: testWechatSecret,
+        },
+      });
+      expect(updatedWechatConfig).toEqual({
+        enabled: false,
+        appId: 'wx-e2e-app-id',
+        secretConfigured: true,
+        secretSource: 'database',
+      });
+
+      const storedWechatSetting = await prisma.systemSetting.findUniqueOrThrow({
+        where: { key: 'wechat_auth' },
+      });
+      const storedWechatValue = storedWechatSetting.value as {
+        encryptedSecret?: string;
+      };
+      expect(storedWechatValue.encryptedSecret).toMatch(/^v1:/);
+      expect(storedWechatValue.encryptedSecret).not.toContain(testWechatSecret);
+      expect(JSON.stringify(updatedWechatConfig)).not.toContain(testWechatSecret);
+    } finally {
+      if (originalWechatSetting) {
+        await prisma.systemSetting.update({
+          where: { key: 'wechat_auth' },
+          data: { value: originalWechatSetting.value as Prisma.InputJsonValue },
+        });
+      } else {
+        await prisma.systemSetting.deleteMany({
+          where: { key: 'wechat_auth' },
+        });
+      }
+    }
+
+    await requestJson('/auth/wechat/bind-sessions', { method: 'POST' }, 401);
+    await requestJson('/auth/wechat/binding', { method: 'DELETE' }, 401);
+
+    const updatedDisplayName = `E2E Profile ${suffix}`;
+    const updatedProfile = await requestJson<CurrentUserResponse>('/auth/me', {
+      method: 'PATCH',
+      token: systemLogin.accessToken,
+      body: { displayName: `  ${updatedDisplayName}  ` },
+    });
+    expect(updatedProfile.displayName).toBe(updatedDisplayName);
+    const refreshedProfile = await requestJson<CurrentUserResponse>('/auth/me', {
+      token: systemLogin.accessToken,
+    });
+    expect(refreshedProfile.displayName).toBe(updatedDisplayName);
+
+    await requestJson(
+      '/auth/password',
+      {
+        method: 'PATCH',
+        token: systemLogin.accessToken,
+        body: { currentPassword: 'wrong-password', newPassword: 'E2eChanged123456' },
+      },
+      401,
+    );
+    await requestJson(
+      '/auth/password',
+      {
+        method: 'PATCH',
+        token: systemLogin.accessToken,
+        body: { currentPassword: systemPassword, newPassword: systemPassword },
+      },
+      400,
+    );
+    const updatedSystemPassword = 'E2eChanged123456';
+    await requestJson<{ message: string }>('/auth/password', {
+      method: 'PATCH',
+      token: systemLogin.accessToken,
+      body: { currentPassword: systemPassword, newPassword: updatedSystemPassword },
+    });
+    await requestJson(
+      '/auth/login',
+      { method: 'POST', body: { username: systemUsername, password: systemPassword } },
+      401,
+    );
+    const refreshedSystemLogin = await login(systemUsername, updatedSystemPassword);
+    systemLogin.accessToken = refreshedSystemLogin.accessToken;
+
     const tenantA = await requestJson<TenantCreateResponse>('/tenants', {
       method: 'POST',
       token: systemLogin.accessToken,
@@ -320,6 +466,11 @@ describe('NEye MVP API e2e', () => {
       token: systemLogin.accessToken,
     });
     expect(templateBinary.byteLength).toBeGreaterThan(1024);
+    const templateWorkbook = XLSX.read(Buffer.from(templateBinary), { type: 'buffer' });
+    const templateSheet = templateWorkbook.Sheets['导入模板'];
+    expect(templateSheet).toBeDefined();
+    const templateHeaders = XLSX.utils.sheet_to_json<unknown[]>(templateSheet!, { header: 1 })[0] || [];
+    expect(templateHeaders).toContain('客户创建时间');
     await requestBinary('/import-tasks/template/customer-optometry', { token: tenantALogin.accessToken }, 403);
     await requestJson(`/import-tasks?tenantId=${tenantA.tenantId}`, { token: tenantALogin.accessToken }, 403);
     await requestForm('/import-tasks/customer-optometry', createImportFormData(tenantA.tenantId), { token: tenantALogin.accessToken }, 403);
@@ -341,6 +492,12 @@ describe('NEye MVP API e2e', () => {
       { token: systemLogin.accessToken },
     );
     expect(importedCustomers.total).toBe(1);
+    expect(importedCustomers.items[0]?.namePinyin).toBeTruthy();
+    expect(importedCustomers.items[0]?.nameInitials).toBeTruthy();
+    const importedCustomerCreatedAt = new Date(importedCustomers.items[0]!.createdAt);
+    expect(importedCustomerCreatedAt.getFullYear()).toBe(2020);
+    expect(importedCustomerCreatedAt.getMonth()).toBe(2);
+    expect(importedCustomerCreatedAt.getDate()).toBe(4);
     const unnamedImportedCustomers = await requestJson<PageResponse<CustomerResponse>>(
       `/customers?tenantId=${tenantA.tenantId}&keyword=${encodeURIComponent(`未命名客户-IMP-C002-${suffix}`)}`,
       { token: systemLogin.accessToken },
@@ -442,6 +599,29 @@ describe('NEye MVP API e2e', () => {
       body: { status: 'active' },
     });
 
+    const multiTenantAccount = await requestJson<AccountResponse>(`/users/${extraUser.id}/tenants`, {
+      method: 'PUT',
+      token: systemLogin.accessToken,
+      body: { tenantIds: [tenantA.tenantId, tenantB.tenantId] },
+    });
+    expect(multiTenantAccount.tenants.map((tenant) => tenant.id).sort()).toEqual(
+      [tenantA.tenantId, tenantB.tenantId].sort(),
+    );
+    const multiTenantLogin = await login(tenantAExtraAccount, tenantPassword);
+    const tenantBProfile = await requestJson<CurrentUserResponse>('/auth/me', {
+      token: multiTenantLogin.accessToken,
+      tenantId: tenantB.tenantId,
+    });
+    expect(tenantBProfile.tenantId).toBe(tenantB.tenantId);
+    expect(tenantBProfile.tenantIds).toEqual(
+      expect.arrayContaining([tenantA.tenantId, tenantB.tenantId]),
+    );
+    const tenantBScopedCustomers = await requestJson<PageResponse<CustomerResponse>>('/customers', {
+      token: multiTenantLogin.accessToken,
+      tenantId: tenantB.tenantId,
+    });
+    expect(tenantBScopedCustomers.items.every((item) => item.tenantId === tenantB.tenantId)).toBe(true);
+
     const resetPassword = `Reset${suffix.replace(/[^a-zA-Z0-9]/g, '').slice(0, 8)}!`;
     const resetResult = await requestJson<{ tenantId: string; username: string }>(`/tenants/${tenantA.tenantId}/admin-password`, {
       method: 'PATCH',
@@ -466,6 +646,45 @@ describe('NEye MVP API e2e', () => {
     });
     expect(firstCustomer.phone).toBeNull();
     expect(secondCustomer.name).toBe(firstCustomer.name);
+    const pinyinCustomerA = await requestJson<CustomerResponse>('/customers', {
+      method: 'POST',
+      token: tenantALogin.accessToken,
+      body: { name: '张三' },
+    });
+    const pinyinCustomerB = await requestJson<CustomerResponse>('/customers', {
+      method: 'POST',
+      token: tenantBLogin.accessToken,
+      body: { name: '张三' },
+    });
+    expect(pinyinCustomerA.namePinyin).toBe('zhangsan');
+    expect(pinyinCustomerA.nameInitials).toBe('zs');
+
+    const customersByInitials = await requestJson<PageResponse<CustomerResponse>>(
+      '/customers?keyword=zs',
+      { token: tenantALogin.accessToken },
+    );
+    expect(customersByInitials.items.some((item) => item.id === pinyinCustomerA.id)).toBe(true);
+    expect(customersByInitials.items.some((item) => item.id === pinyinCustomerB.id)).toBe(false);
+
+    const customersByFullPinyin = await requestJson<PageResponse<CustomerResponse>>(
+      '/customers?keyword=ZHANGSAN',
+      { token: tenantALogin.accessToken },
+    );
+    expect(customersByFullPinyin.items.some((item) => item.id === pinyinCustomerA.id)).toBe(true);
+
+    const renamedPinyinCustomer = await requestJson<CustomerResponse>(`/customers/${pinyinCustomerA.id}`, {
+      method: 'PATCH',
+      token: tenantALogin.accessToken,
+      body: { name: '李四' },
+    });
+    expect(renamedPinyinCustomer.namePinyin).toBe('lisi');
+    expect(renamedPinyinCustomer.nameInitials).toBe('ls');
+
+    const customersByUpdatedInitials = await requestJson<PageResponse<CustomerResponse>>(
+      '/customers?keyword=ls',
+      { token: tenantALogin.accessToken },
+    );
+    expect(customersByUpdatedInitials.items.some((item) => item.id === pinyinCustomerA.id)).toBe(true);
 
     const searchName = `E2E Searchable ${suffix}`;
     const searchPhone = `139${Math.random().toString().slice(2, 10)}`;
@@ -545,6 +764,17 @@ describe('NEye MVP API e2e', () => {
       token: tenantBLogin.accessToken,
       body: { optometryDate: '2026-07-07', farRightSph: '-2.00' },
     });
+
+    await expect(
+      prisma.optometryOrder.create({
+        data: {
+          tenantId: tenantA.tenantId,
+          customerId: searchableCustomerB.id,
+          orderNo: 'DB-CROSS-' + Date.now(),
+          optometryDate: new Date('2026-07-07'),
+        },
+      }),
+    ).rejects.toThrow();
     await requestJson(
       `/optometry-orders/${optometryOrderB.id}/fitting-orders`,
       { method: 'POST', token: tenantALogin.accessToken, body: { frameInfo: `Cross Tenant Frame ${suffix}`, framePrice: '1.00' } },
@@ -592,12 +822,21 @@ describe('NEye MVP API e2e', () => {
     await requestJson(`/customers/${firstCustomer.id}`, { token: tenantBLogin.accessToken }, 404);
     await requestJson(`/optometry-orders/${optometryOrder.id}`, { token: tenantBLogin.accessToken }, 404);
     await requestJson(`/fitting-orders/${firstFitting.id}`, { token: tenantBLogin.accessToken }, 404);
-    const crossTenantUpdatedFrame = await requestJson<ProductItemResponse>(`/product-items/${frameItemsA.items[0]!.id}`, {
+    await requestJson(
+      '/product-items/' + frameItemsA.items[0]!.id,
+      {
+        method: 'PATCH',
+        token: tenantBLogin.accessToken,
+        body: { remark: 'staff must not edit the global dictionary' },
+      },
+      403,
+    );
+    const adminUpdatedFrame = await requestJson<ProductItemResponse>('/product-items/' + frameItemsA.items[0]!.id, {
       method: 'PATCH',
-      token: tenantBLogin.accessToken,
-      body: { remark: 'global product item updated by another tenant' },
+      token: systemLogin.accessToken,
+      body: { remark: 'global product item maintained by admin' },
     });
-    expect(crossTenantUpdatedFrame.id).toBe(frameItemsA.items[0]!.id);
+    expect(adminUpdatedFrame.id).toBe(frameItemsA.items[0]!.id);
 
     const frameItemsB = await requestJson<PageResponse<ProductItemResponse>>(
       `/product-items?category=frame&keyword=${encodeURIComponent(frameInfo)}`,
@@ -667,32 +906,41 @@ describe('NEye MVP API e2e', () => {
     await requestJson(`/optometry-orders/${batchCustomerOptometry.id}`, { token: tenantALogin.accessToken }, 404);
     await requestJson(`/fitting-orders/${batchCustomerFitting.id}`, { token: tenantALogin.accessToken }, 404);
 
+    await requestJson(
+      '/product-items',
+      {
+        method: 'POST',
+        token: tenantALogin.accessToken,
+        body: { category: 'other', name: 'E2E Forbidden Product ' + suffix, defaultPrice: '1.00' },
+      },
+      403,
+    );
     const batchProductA = await requestJson<ProductItemResponse>('/product-items', {
       method: 'POST',
-      token: tenantALogin.accessToken,
+      token: systemLogin.accessToken,
       body: { category: 'other', name: `E2E Batch Product A ${suffix}`, defaultPrice: '1.00' },
     });
     const batchProductB = await requestJson<ProductItemResponse>('/product-items', {
       method: 'POST',
-      token: tenantALogin.accessToken,
+      token: systemLogin.accessToken,
       body: { category: 'other', name: `E2E Batch Product B ${suffix}`, defaultPrice: '2.00' },
     });
     const deletedProducts = await requestJson<BatchDeleteResponse>('/product-items/batch-delete', {
       method: 'POST',
-      token: tenantALogin.accessToken,
+      token: systemLogin.accessToken,
       body: { ids: [batchProductA.id, batchProductB.id] },
     });
     expect(deletedProducts.deletedCount).toBe(2);
     const batchProductQuery = await requestJson<PageResponse<ProductItemResponse>>(
       `/product-items?category=other&keyword=${encodeURIComponent(`E2E Batch Product ${suffix}`)}`,
-      { token: tenantALogin.accessToken },
+      { token: systemLogin.accessToken },
     );
     expect(batchProductQuery.total).toBe(0);
 
     const manualProductName = `E2E Manual Lens ${suffix}`;
     const manualProduct = await requestJson<ProductItemResponse>('/product-items', {
       method: 'POST',
-      token: tenantALogin.accessToken,
+      token: systemLogin.accessToken,
       body: { category: 'lens', name: manualProductName, defaultPrice: '88.00', remark: 'manual create' },
     });
     const manualQuery = await requestJson<PageResponse<ProductItemResponse>>(
@@ -703,18 +951,18 @@ describe('NEye MVP API e2e', () => {
 
     const updatedManualProduct = await requestJson<ProductItemResponse>(`/product-items/${manualProduct.id}`, {
       method: 'PATCH',
-      token: tenantALogin.accessToken,
+      token: systemLogin.accessToken,
       body: { defaultPrice: '99.50', remark: 'manual update' },
     });
     expect(Number(updatedManualProduct.defaultPrice)).toBeCloseTo(99.5);
 
     await requestJson<ProductItemResponse>(`/product-items/${manualProduct.id}`, {
       method: 'DELETE',
-      token: tenantALogin.accessToken,
+      token: systemLogin.accessToken,
     });
     const manualQueryAfterDelete = await requestJson<PageResponse<ProductItemResponse>>(
       `/product-items?category=lens&keyword=${encodeURIComponent(manualProductName)}`,
-      { token: tenantALogin.accessToken },
+      { token: systemLogin.accessToken },
     );
     expect(manualQueryAfterDelete.items.some((item) => item.id === manualProduct.id)).toBe(false);
 
@@ -731,18 +979,24 @@ describe('NEye MVP API e2e', () => {
       token: systemLogin.accessToken,
     });
     expect(deletedTenantB.deletedCount).toBe(1);
-    expect(deletedTenantB.relatedDeleted?.users).toBeGreaterThanOrEqual(1);
+    expect(deletedTenantB.relatedDeleted?.accountAssignments).toBeGreaterThanOrEqual(1);
     expect(deletedTenantB.relatedDeleted?.customers).toBeGreaterThanOrEqual(1);
     expect(deletedTenantB.relatedDeleted?.optometryOrders).toBeGreaterThanOrEqual(1);
     await requestJson(`/tenants/${tenantB.tenantId}`, { token: systemLogin.accessToken }, 404);
-    await requestJson('/auth/login', { method: 'POST', body: { username: tenantBAccount, password: tenantPassword } }, 401);
+    const tenantBAccountAfterDeletion = await login(tenantBAccount, tenantPassword);
+    expect(tenantBAccountAfterDeletion.user.tenantId).toBeNull();
+    await requestJson('/customers', { token: tenantBAccountAfterDeletion.accessToken }, 403);
+
+    const multiTenantAfterDeletion = await login(tenantAExtraAccount, tenantPassword);
+    expect(multiTenantAfterDeletion.user.tenantIds).toEqual([tenantA.tenantId]);
 
     await requestJson(`/tenants/${tenantA.tenantId}`, {
       method: 'PATCH',
       token: systemLogin.accessToken,
       body: { status: 'disabled' },
     });
-    await requestJson('/customers', { token: tenantALogin.accessToken }, 401);
-    await requestJson('/auth/login', { method: 'POST', body: { username: tenantAAccount, password: resetPassword } }, 401);
+    await requestJson('/customers', { token: tenantALogin.accessToken }, 403);
+    const disabledTenantLogin = await login(tenantAAccount, resetPassword);
+    expect(disabledTenantLogin.user.tenantId).toBeNull();
   });
 });

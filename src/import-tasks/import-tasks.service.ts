@@ -1,8 +1,9 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { Gender, ImportTaskRowStatus, ImportTaskStatus, ImportTaskType, Prisma } from '@prisma/client';
 import * as XLSX from 'xlsx';
 import { toPageResult } from '../common/dto/page.dto';
 import { createOrderNo } from '../common/order-number';
+import { buildCustomerNameSearchFields } from '../customers/customer-name-search';
 import { CurrentUser } from '../common/types/current-user';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateImportTaskDto } from './dto/create-import-task.dto';
@@ -19,6 +20,7 @@ interface CustomerProfile {
   gender?: Gender;
   age?: number;
   remark?: string;
+  createdAt?: Date;
 }
 
 interface ProcessRowResult {
@@ -33,6 +35,7 @@ const BASE_COLUMNS: Array<[string, string]> = [
   ['性别', '非必填。可填：未知、男、女。'],
   ['年龄', '非必填。数字。'],
   ['客户备注', '非必填。'],
+  ['客户创建时间', '非必填。用于迁移历史客户档案，建议格式：YYYY-MM-DD HH:mm:ss；为空或无法识别时使用导入时间。'],
   ['验光日期', '非必填。为空时默认使用导入当天日期。建议格式：YYYY-MM-DD。'],
 ];
 
@@ -82,8 +85,39 @@ const OPTOMETRY_TEXT_FIELDS = new Set([...HEADER_TO_FIELD.values()]);
 const TERMINAL_STATUSES = new Set<ImportTaskStatus>([ImportTaskStatus.canceled, ImportTaskStatus.completed, ImportTaskStatus.failed]);
 
 @Injectable()
-export class ImportTasksService {
+export class ImportTasksService implements OnModuleInit {
+  private readonly logger = new Logger(ImportTasksService.name);
+
   constructor(private readonly prisma: PrismaService) {}
+
+  async onModuleInit() {
+    const recovered = await this.prisma.importTask.updateMany({
+      where: { status: ImportTaskStatus.running, deletedAt: null },
+      data: { status: ImportTaskStatus.pending },
+    });
+    const resumableTasks = await this.prisma.importTask.findMany({
+      where: {
+        status: { in: [ImportTaskStatus.pending, ImportTaskStatus.canceling] },
+        deletedAt: null,
+      },
+      select: { id: true },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    if (recovered.count > 0) {
+      this.logger.warn(`Recovered ${recovered.count} interrupted import task(s)`);
+    }
+    resumableTasks.forEach((task) => this.scheduleTask(task.id));
+  }
+
+  private scheduleTask(taskId: string) {
+    setImmediate(() => {
+      void this.processTask(taskId).catch((error: unknown) => {
+        const message = error instanceof Error ? error.stack || error.message : String(error);
+        this.logger.error(`Import task ${taskId} stopped unexpectedly: ${message}`);
+      });
+    });
+  }
 
   async list(query: ImportTaskQueryDto) {
     const where: Prisma.ImportTaskWhereInput = {
@@ -150,7 +184,7 @@ export class ImportTasksService {
       include: { tenant: true, createdBy: { select: { id: true, username: true, displayName: true, role: true, status: true } } },
     });
 
-    setImmediate(() => void this.processTask(task.id));
+    this.scheduleTask(task.id);
     return task;
   }
 
@@ -253,7 +287,7 @@ export class ImportTasksService {
     const template = XLSX.utils.aoa_to_sheet([headers]);
     const example = XLSX.utils.aoa_to_sheet([
       headers,
-      this.rowFromObject({ 客户导入编号: 'C001', 客户姓名: '张三', 手机号: '13800000001', 性别: '男', 年龄: 32, 验光日期: '2026-01-01', 远用右眼球光: -1.0, 远用左眼球光: -1.25, 远用总瞳距: 62, 验光备注: '第一次验光' }, headers),
+      this.rowFromObject({ 客户导入编号: 'C001', 客户姓名: '张三', 手机号: '13800000001', 性别: '男', 年龄: 32, 客户创建时间: '2025-12-20 09:30:00', 验光日期: '2026-01-01', 远用右眼球光: -1.0, 远用左眼球光: -1.25, 远用总瞳距: 62, 验光备注: '第一次验光' }, headers),
       this.rowFromObject({ 客户导入编号: 'C001', 验光日期: '2026-06-01', 远用右眼球光: -1.25, 远用左眼球光: -1.5, 远用总瞳距: 62.5, 验光备注: '同一客户第二张验光单，客户信息可不重复填' }, headers),
       this.rowFromObject({ 客户导入编号: 'C002', 近用右眼加光: 1.5, 近用左眼加光: 1.5, 近用瞳距: 58, 验光备注: '姓名和日期为空，系统使用默认客户名和导入当天日期' }, headers),
     ]);
@@ -265,6 +299,7 @@ export class ImportTasksService {
       ['客户合并', '同一次导入中，相同“客户导入编号”归为同一个客户。'],
       ['多张验光单', '同一客户多张验光单写多行，客户导入编号保持一致。'],
       ['客户姓名为空', '系统生成：未命名客户-客户导入编号。'],
+      ['客户创建时间', '同一客户多行时取第一次出现的非空值；为空或无法识别时使用实际导入时间。'],
       ['验光日期为空', '系统使用导入当天日期。'],
     ]);
     XLSX.utils.book_append_sheet(workbook, template, '导入模板');
@@ -305,16 +340,35 @@ export class ImportTasksService {
     }
     if (task.status !== ImportTaskStatus.pending) return;
 
-    await this.prisma.importTask.update({ where: { id: taskId }, data: { status: ImportTaskStatus.running, startedAt: new Date() } });
-    const rows = await this.prisma.importTaskRow.findMany({ where: { taskId, status: ImportTaskRowStatus.pending }, orderBy: { rowNo: 'asc' } });
-    const profiles = this.buildCustomerProfiles(rows.map((row) => ({ rowNo: row.rowNo, data: row.rawData as Record<string, string> })));
+    const claimed = await this.prisma.importTask.updateMany({
+      where: { id: taskId, status: ImportTaskStatus.pending, deletedAt: null },
+      data: { status: ImportTaskStatus.running, startedAt: new Date(), finishedAt: null, errorMessage: null },
+    });
+    if (claimed.count === 0) return;
+
+    const allRows = await this.prisma.importTaskRow.findMany({
+      where: { taskId },
+      orderBy: { rowNo: 'asc' },
+    });
+    const pendingRows = allRows.filter((row) => row.status === ImportTaskRowStatus.pending);
+    const profiles = this.buildCustomerProfiles(
+      allRows.map((row) => ({ rowNo: row.rowNo, data: row.rawData as Record<string, string> })),
+    );
     const customerIds = new Map<string, string>();
-    let processedRows = 0;
-    let successRows = 0;
-    let failedRows = 0;
+    for (const row of allRows) {
+      const data = (row.rawData || {}) as Record<string, string>;
+      const importCustomerNo = row.importCustomerNo || this.text(data['客户导入编号']);
+      if (row.status === ImportTaskRowStatus.success && importCustomerNo && row.customerId) {
+        customerIds.set(importCustomerNo, row.customerId);
+      }
+    }
+
+    let successRows = allRows.filter((row) => row.status === ImportTaskRowStatus.success).length;
+    let failedRows = allRows.filter((row) => row.status === ImportTaskRowStatus.failed).length;
+    let processedRows = allRows.length - pendingRows.length;
 
     try {
-      for (const row of rows) {
+      for (const row of pendingRows) {
         const currentTask = await this.prisma.importTask.findUnique({ where: { id: taskId }, select: { status: true, cancelRequestedAt: true } });
         if (!currentTask || currentTask.status === ImportTaskStatus.canceling || currentTask.cancelRequestedAt) {
           await this.finishCanceled(taskId);
@@ -393,10 +447,12 @@ export class ImportTasksService {
             tenantId,
             customerNo: createOrderNo('C'),
             name: profile.name || `未命名客户-${importCustomerNo}`,
+            ...buildCustomerNameSearchFields(profile.name || `未命名客户-${importCustomerNo}`),
             phone: profile.phone,
             gender: profile.gender || Gender.unknown,
             age: profile.age,
             remark: profile.remark,
+            ...(profile.createdAt ? { createdAt: profile.createdAt } : {}),
           },
         });
         customerId = customer.id;
@@ -430,6 +486,7 @@ export class ImportTasksService {
         gender: current.gender || this.parseGender(row.data['性别']),
         age: current.age ?? this.parseAge(row.data['年龄']),
         remark: current.remark || this.text(row.data['客户备注']),
+        createdAt: current.createdAt ?? this.parseOptionalDateTime(row.data['客户创建时间']),
       });
     }
     return profiles;
@@ -469,6 +526,42 @@ export class ImportTasksService {
     const age = Number(match[0]);
     if (!Number.isInteger(age) || age < 0 || age > 150) return undefined;
     return age;
+  }
+
+  private parseOptionalDateTime(value: unknown): Date | undefined {
+    const text = this.normalizeInputText(value);
+    if (!text) return undefined;
+
+    const compact = text.replace(/\s+/g, '');
+    if (/^\d{1,6}(?:\.\d+)?$/.test(compact)) {
+      const parsed = XLSX.SSF.parse_date_code(Number(compact));
+      if (parsed) return new Date(parsed.y, parsed.m - 1, parsed.d, parsed.H, parsed.M, Math.floor(parsed.S));
+    }
+
+    const normalized = text
+      .replace(/[年月]/g, '-')
+      .replace(/日/g, ' ')
+      .replace(/[./]/g, '-')
+      .trim();
+    const match = normalized.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T]+(\d{1,2})(?::(\d{1,2}))?(?::(\d{1,2}))?)?$/);
+    if (match) {
+      const [year, month, day, hour, minute, second] = match.slice(1).map((part) => Number(part || 0));
+      const date = new Date(year, month - 1, day, hour, minute, second);
+      if (
+        date.getFullYear() === year &&
+        date.getMonth() === month - 1 &&
+        date.getDate() === day &&
+        date.getHours() === hour &&
+        date.getMinutes() === minute &&
+        date.getSeconds() === second
+      ) {
+        return date;
+      }
+      return undefined;
+    }
+
+    const date = new Date(normalized);
+    return Number.isNaN(date.getTime()) ? undefined : date;
   }
 
   private parseDate(value: unknown): Date {

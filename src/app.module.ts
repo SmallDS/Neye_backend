@@ -8,6 +8,7 @@ import { OptometryOrdersModule } from './optometry-orders/optometry-orders.modul
 import { PrismaModule } from './prisma/prisma.module';
 import { ProductItemsModule } from './product-items/product-items.module';
 import { TenantsModule } from './tenants/tenants.module';
+import { UsersModule } from './users/users.module';
 import { SystemSettingsModule } from './system-settings/system-settings.module';
 
 @Module({
@@ -15,6 +16,7 @@ import { SystemSettingsModule } from './system-settings/system-settings.module';
     PrismaModule,
     AuthModule,
     TenantsModule,
+    UsersModule,
     CustomersModule,
     OptometryOrdersModule,
     ProductItemsModule,

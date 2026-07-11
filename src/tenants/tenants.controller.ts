@@ -62,6 +62,11 @@ export class TenantsController {
     return this.tenantsService.createUser(id, dto);
   }
 
+  @Delete(':id/users/:userId')
+  removeUser(@Param('id') id: string, @Param('userId') userId: string) {
+    return this.tenantsService.removeUser(id, userId);
+  }
+
   @Patch(':id/users/:userId')
   updateUser(@Param('id') id: string, @Param('userId') userId: string, @Body() dto: UpdateTenantUserDto) {
     return this.tenantsService.updateUser(id, userId, dto);

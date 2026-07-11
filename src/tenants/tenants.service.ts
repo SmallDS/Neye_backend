@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { UserRole } from '@prisma/client';
+import { Prisma, UserRole } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
 import { BatchDeleteDto } from '../common/dto/batch-delete.dto';
 import { createOrderNo } from '../common/order-number';
@@ -12,22 +12,21 @@ import { TenantQueryDto } from './dto/tenant-query.dto';
 import { UpdateTenantDto } from './dto/update-tenant.dto';
 import { UpdateTenantUserDto } from './dto/update-tenant-user.dto';
 
+const userSelect = Prisma.validator<Prisma.UserSelect>()({
+  id: true,
+  username: true,
+  displayName: true,
+  role: true,
+  status: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
 @Injectable()
 export class TenantsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  private readonly userSelect = {
-    id: true,
-    tenantId: true,
-    username: true,
-    displayName: true,
-    role: true,
-    status: true,
-    createdAt: true,
-    updatedAt: true,
-  };
-
-  private initialAccount(dto: CreateTenantDto): CreateTenantUserDto | undefined {
+  private initialAccount(dto: CreateTenantDto): { displayName: string; password: string; username: string } | undefined {
     const username = dto.accountUsername ?? dto.adminUsername;
     const password = dto.accountPassword ?? dto.adminPassword;
     const displayName = dto.accountDisplayName ?? dto.adminDisplayName;
@@ -41,14 +40,12 @@ export class TenantsService {
 
   private async ensureTenant(id: string) {
     const tenant = await this.prisma.tenant.findUnique({ where: { id } });
-    if (!tenant) {
-      throw new NotFoundException('Tenant not found');
-    }
+    if (!tenant) throw new NotFoundException('Tenant not found');
     return tenant;
   }
 
   async list(query: TenantQueryDto) {
-    const where = {
+    const where: Prisma.TenantWhereInput = {
       ...(query.status ? { status: query.status } : {}),
       ...(query.keyword
         ? { OR: [{ name: { contains: query.keyword } }, { code: { contains: query.keyword } }] }
@@ -68,26 +65,32 @@ export class TenantsService {
 
   async get(id: string) {
     const tenant = await this.ensureTenant(id);
-    const [users, customersCount, optometryOrdersCount, fittingOrdersCount, recentCustomers, recentOptometryOrders, recentFittingOrders] = await this.prisma.$transaction([
-      this.prisma.user.findMany({ where: { tenantId: id }, select: this.userSelect, orderBy: { createdAt: 'desc' } }),
-      this.prisma.customer.count({ where: { tenantId: id, deletedAt: null } }),
-      this.prisma.optometryOrder.count({ where: { tenantId: id, deletedAt: null } }),
-      this.prisma.fittingOrder.count({ where: { tenantId: id, deletedAt: null } }),
-      this.prisma.customer.findMany({ where: { tenantId: id, deletedAt: null }, orderBy: { createdAt: 'desc' }, take: 8 }),
-      this.prisma.optometryOrder.findMany({
-        where: { tenantId: id, deletedAt: null },
-        include: { customer: true },
-        orderBy: { optometryDate: 'desc' },
-        take: 8,
-      }),
-      this.prisma.fittingOrder.findMany({
-        where: { tenantId: id, deletedAt: null },
-        include: { customer: true, optometryOrder: true },
-        orderBy: { createdAt: 'desc' },
-        take: 8,
-      }),
-    ]);
+    const [memberships, customersCount, optometryOrdersCount, fittingOrdersCount, recentCustomers, recentOptometryOrders, recentFittingOrders] =
+      await this.prisma.$transaction([
+        this.prisma.userTenant.findMany({
+          where: { tenantId: id },
+          include: { user: { select: userSelect } },
+          orderBy: { assignedAt: 'desc' },
+        }),
+        this.prisma.customer.count({ where: { tenantId: id, deletedAt: null } }),
+        this.prisma.optometryOrder.count({ where: { tenantId: id, deletedAt: null } }),
+        this.prisma.fittingOrder.count({ where: { tenantId: id, deletedAt: null } }),
+        this.prisma.customer.findMany({ where: { tenantId: id, deletedAt: null }, orderBy: { createdAt: 'desc' }, take: 8 }),
+        this.prisma.optometryOrder.findMany({
+          where: { tenantId: id, deletedAt: null },
+          include: { customer: true },
+          orderBy: { optometryDate: 'desc' },
+          take: 8,
+        }),
+        this.prisma.fittingOrder.findMany({
+          where: { tenantId: id, deletedAt: null },
+          include: { customer: true, optometryOrder: true },
+          orderBy: { createdAt: 'desc' },
+          take: 8,
+        }),
+      ]);
 
+    const users = memberships.map((membership) => this.serializeMembership(membership));
     return {
       ...tenant,
       counts: {
@@ -107,9 +110,7 @@ export class TenantsService {
     const account = this.initialAccount(dto);
     if (account) {
       const existed = await this.prisma.user.findUnique({ where: { username: account.username } });
-      if (existed) {
-        throw new ConflictException('Account username already exists');
-      }
+      if (existed) throw new ConflictException('Account username already exists');
     }
 
     return this.prisma.$transaction(async (tx) => {
@@ -125,13 +126,13 @@ export class TenantsService {
       const user = account
         ? await tx.user.create({
             data: {
-              tenantId: tenant.id,
               username: account.username,
               passwordHash: await bcrypt.hash(account.password, 10),
               displayName: account.displayName,
               role: UserRole.staff,
+              tenantMemberships: { create: { tenantId: tenant.id } },
             },
-            select: this.userSelect,
+            select: userSelect,
           })
         : undefined;
 
@@ -146,67 +147,88 @@ export class TenantsService {
 
   async listUsers(id: string) {
     await this.ensureTenant(id);
-    return this.prisma.user.findMany({
+    const memberships = await this.prisma.userTenant.findMany({
       where: { tenantId: id },
-      select: this.userSelect,
-      orderBy: { createdAt: 'desc' },
+      include: { user: { select: userSelect } },
+      orderBy: { assignedAt: 'desc' },
     });
+    return memberships.map((membership) => this.serializeMembership(membership));
   }
 
   async createUser(id: string, dto: CreateTenantUserDto) {
     await this.ensureTenant(id);
-    const existed = await this.prisma.user.findUnique({ where: { username: dto.username } });
-    if (existed) {
-      throw new ConflictException('Account username already exists');
+
+    if (dto.userId) {
+      const user = await this.prisma.user.findUnique({ where: { id: dto.userId }, select: userSelect });
+      if (!user) throw new NotFoundException('Account not found');
+      if (user.role === UserRole.admin) throw new BadRequestException('Admin accounts do not need tenant assignments');
+
+      const membership = await this.prisma.userTenant.upsert({
+        where: { userId_tenantId: { userId: user.id, tenantId: id } },
+        create: { userId: user.id, tenantId: id },
+        update: {},
+        include: { user: { select: userSelect } },
+      });
+      return this.serializeMembership(membership);
     }
-    return this.prisma.user.create({
+
+    if (!dto.username || !dto.password || !dto.displayName) {
+      throw new BadRequestException('Use userId to assign an existing account, or provide username, password and displayName');
+    }
+    const existed = await this.prisma.user.findUnique({ where: { username: dto.username } });
+    if (existed) throw new ConflictException('Account username already exists');
+
+    const user = await this.prisma.user.create({
       data: {
-        tenantId: id,
         username: dto.username,
         passwordHash: await bcrypt.hash(dto.password, 10),
         displayName: dto.displayName,
         role: UserRole.staff,
+        tenantMemberships: { create: { tenantId: id } },
       },
-      select: this.userSelect,
+      select: userSelect,
     });
+    return { ...user, tenantId: id, assignedAt: user.createdAt };
   }
 
   async updateUser(tenantId: string, userId: string, dto: UpdateTenantUserDto) {
-    await this.ensureTenant(tenantId);
-    const user = await this.prisma.user.findFirst({ where: { id: userId, tenantId } });
-    if (!user) {
-      throw new NotFoundException('Tenant account not found');
-    }
-    return this.prisma.user.update({ where: { id: userId }, data: dto, select: this.userSelect });
+    await this.ensureMembership(tenantId, userId);
+    const user = await this.prisma.user.update({ where: { id: userId }, data: dto, select: userSelect });
+    const membership = await this.prisma.userTenant.findUniqueOrThrow({
+      where: { userId_tenantId: { userId, tenantId } },
+    });
+    return { ...user, tenantId, assignedAt: membership.assignedAt };
   }
 
   async resetUserPassword(tenantId: string, userId: string, dto: ResetTenantUserPasswordDto) {
-    await this.ensureTenant(tenantId);
-    const user = await this.prisma.user.findFirst({ where: { id: userId, tenantId } });
-    if (!user) {
-      throw new NotFoundException('Tenant account not found');
-    }
+    const membership = await this.ensureMembership(tenantId, userId);
     await this.prisma.user.update({
       where: { id: userId },
       data: { passwordHash: await bcrypt.hash(dto.password, 10) },
     });
-    return { tenantId, userId, username: user.username };
+    return { tenantId, userId, username: membership.user.username };
+  }
+
+  async removeUser(tenantId: string, userId: string) {
+    await this.ensureMembership(tenantId, userId);
+    await this.prisma.userTenant.delete({ where: { userId_tenantId: { userId, tenantId } } });
+    return { tenantId, userId };
   }
 
   async resetAdminPassword(id: string, password: string) {
     await this.ensureTenant(id);
-    const user = await this.prisma.user.findFirst({
+    const membership = await this.prisma.userTenant.findFirst({
       where: { tenantId: id },
-      orderBy: { createdAt: 'asc' },
+      include: { user: true },
+      orderBy: { assignedAt: 'asc' },
     });
-    if (!user) {
-      throw new NotFoundException('Tenant account not found');
-    }
+    if (!membership) throw new NotFoundException('Tenant account not found');
+
     await this.prisma.user.update({
-      where: { id: user.id },
+      where: { id: membership.userId },
       data: { passwordHash: await bcrypt.hash(password, 10) },
     });
-    return { tenantId: id, accountUserId: user.id, username: user.username };
+    return { tenantId: id, accountUserId: membership.userId, username: membership.user.username };
   }
 
   async remove(id: string) {
@@ -217,25 +239,46 @@ export class TenantsService {
     return this.deleteTenantTree(dto.ids);
   }
 
+  private async ensureMembership(tenantId: string, userId: string) {
+    await this.ensureTenant(tenantId);
+    const membership = await this.prisma.userTenant.findUnique({
+      where: { userId_tenantId: { userId, tenantId } },
+      include: { user: true },
+    });
+    if (!membership) throw new NotFoundException('Tenant account assignment not found');
+    return membership;
+  }
+
+  private serializeMembership(membership: {
+    assignedAt: Date;
+    tenantId: string;
+    user: Prisma.UserGetPayload<{ select: typeof userSelect }>;
+  }) {
+    return {
+      ...membership.user,
+      tenantId: membership.tenantId,
+      assignedAt: membership.assignedAt,
+    };
+  }
+
   private async deleteTenantTree(ids: string[]) {
     const tenantIds = [...new Set(ids)];
     return this.prisma.$transaction(async (tx) => {
       const existingTenants = await tx.tenant.findMany({ where: { id: { in: tenantIds } }, select: { id: true } });
-      if (existingTenants.length !== tenantIds.length) {
-        throw new NotFoundException('Some tenants are not found');
-      }
+      if (existingTenants.length !== tenantIds.length) throw new NotFoundException('Some tenants are not found');
 
       const fittingOrders = await tx.fittingOrder.deleteMany({ where: { tenantId: { in: tenantIds } } });
       const optometryOrders = await tx.optometryOrder.deleteMany({ where: { tenantId: { in: tenantIds } } });
       const customers = await tx.customer.deleteMany({ where: { tenantId: { in: tenantIds } } });
       const importTasks = await tx.importTask.deleteMany({ where: { tenantId: { in: tenantIds } } });
-      const users = await tx.user.deleteMany({ where: { tenantId: { in: tenantIds } } });
+      const memberships = await tx.userTenant.deleteMany({ where: { tenantId: { in: tenantIds } } });
+      await tx.user.updateMany({ where: { tenantId: { in: tenantIds } }, data: { tenantId: null } });
       const tenants = await tx.tenant.deleteMany({ where: { id: { in: tenantIds } } });
 
       return {
         deletedCount: tenants.count,
         relatedDeleted: {
-          users: users.count,
+          accountAssignments: memberships.count,
           customers: customers.count,
           optometryOrders: optometryOrders.count,
           fittingOrders: fittingOrders.count,
