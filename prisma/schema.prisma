@@ -60,6 +60,15 @@ enum ImportTaskStatus {
   failed
 }
 
+enum ImportTaskPhase {
+  uploaded
+  parsing
+  processing
+  publishing
+  cleanup
+  finished
+}
+
 enum ImportTaskRowStatus {
   pending
   success
@@ -80,9 +89,9 @@ model Tenant {
   legacyUsers       User[]
   tenantMemberships UserTenant[]
   customers         Customer[]
-  optometryOrders OptometryOrder[]
-  fittingOrders   FittingOrder[]
-  importTasks     ImportTask[]
+  optometryOrders   OptometryOrder[]
+  fittingOrders     FittingOrder[]
+  importTasks       ImportTask[]
 
   @@map("tenants")
 }
@@ -98,12 +107,12 @@ model User {
   createdAt    DateTime   @default(now()) @map("created_at")
   updatedAt    DateTime   @updatedAt @map("updated_at")
 
-  tenant             Tenant?      @relation(fields: [tenantId], references: [id])
-  tenantMemberships   UserTenant[]
-  wechatBinding       UserWechatBinding?
-  wechatLoginSessions WechatLoginSession[] @relation("WechatLoginSessionTargetUser")
+  tenant                       Tenant?              @relation(fields: [tenantId], references: [id])
+  tenantMemberships            UserTenant[]
+  wechatBinding                UserWechatBinding?
+  wechatLoginSessions          WechatLoginSession[] @relation("WechatLoginSessionTargetUser")
   confirmedWechatLoginSessions WechatLoginSession[] @relation("WechatLoginSessionUser")
-  createdImportTasks  ImportTask[] @relation("ImportTaskCreatedBy")
+  createdImportTasks           ImportTask[]         @relation("ImportTaskCreatedBy")
 
   @@index([tenantId])
   @@index([role])
@@ -145,23 +154,25 @@ model ProductItem {
 }
 
 model Customer {
-  id         String    @id @default(uuid()) @db.Uuid
-  tenantId   String    @map("tenant_id") @db.Uuid
-  customerNo String    @map("customer_no") @db.VarChar(32)
+  id           String    @id @default(uuid()) @db.Uuid
+  tenantId     String    @map("tenant_id") @db.Uuid
+  customerNo   String    @map("customer_no") @db.VarChar(32)
   name         String    @db.VarChar(80)
   namePinyin   String?   @map("name_pinyin") @db.VarChar(512)
   nameInitials String?   @map("name_initials") @db.VarChar(80)
-  phone      String?   @db.VarChar(32)
-  gender     Gender    @default(unknown)
-  age        Int?
-  remark     String?   @db.Text
-  createdAt  DateTime  @default(now()) @map("created_at")
-  updatedAt  DateTime  @updatedAt @map("updated_at")
-  deletedAt  DateTime? @map("deleted_at")
+  phone        String?   @db.VarChar(32)
+  gender       Gender    @default(unknown)
+  age          Int?
+  remark       String?   @db.Text
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+  deletedAt    DateTime? @map("deleted_at")
+  importTaskId String?   @map("import_task_id") @db.Uuid
 
   tenant          Tenant           @relation(fields: [tenantId], references: [id])
   optometryOrders OptometryOrder[]
   fittingOrders   FittingOrder[]
+  importTask      ImportTask?      @relation("ImportTaskCustomers", fields: [importTaskId], references: [id], onDelete: SetNull)
 
   @@unique([tenantId, customerNo])
   @@unique([id, tenantId])
@@ -169,6 +180,7 @@ model Customer {
   @@index([tenantId, name])
   @@index([tenantId, namePinyin])
   @@index([tenantId, nameInitials])
+  @@index([importTaskId])
   @@map("customers")
 }
 
@@ -230,17 +242,20 @@ model OptometryOrder {
   rightHeight    String?  @map("right_height") @db.Text
   leftHeight     String?  @map("left_height") @db.Text
 
-  createdAt DateTime  @default(now()) @map("created_at")
-  updatedAt DateTime  @updatedAt @map("updated_at")
-  deletedAt DateTime? @map("deleted_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+  deletedAt    DateTime? @map("deleted_at")
+  importTaskId String?   @map("import_task_id") @db.Uuid
 
   tenant        Tenant         @relation(fields: [tenantId], references: [id])
   customer      Customer       @relation(fields: [customerId, tenantId], references: [id, tenantId])
   fittingOrders FittingOrder[]
+  importTask    ImportTask?    @relation("ImportTaskOptometryOrders", fields: [importTaskId], references: [id], onDelete: SetNull)
 
   @@unique([tenantId, orderNo])
   @@unique([id, tenantId])
   @@index([tenantId, customerId, optometryDate])
+  @@index([importTaskId])
   @@map("optometry_orders")
 }
 
@@ -292,14 +307,19 @@ model ImportTask {
   createdById             String           @map("created_by_id") @db.Uuid
   type                    ImportTaskType   @default(customer_optometry)
   status                  ImportTaskStatus @default(pending)
+  phase                   ImportTaskPhase  @default(uploaded)
   fileName                String           @map("file_name") @db.VarChar(255)
   totalRows               Int              @default(0) @map("total_rows")
+  stagedRows              Int              @default(0) @map("staged_rows")
+  lastStagedRowNo         Int              @default(0) @map("last_staged_row_no")
+  lastProcessedRowNo      Int              @default(0) @map("last_processed_row_no")
   processedRows           Int              @default(0) @map("processed_rows")
   successRows             Int              @default(0) @map("success_rows")
   failedRows              Int              @default(0) @map("failed_rows")
   errorMessage            String?          @map("error_message") @db.Text
   startedAt               DateTime?        @map("started_at")
   finishedAt              DateTime?        @map("finished_at")
+  publishedAt             DateTime?        @map("published_at")
   cancelRequestedAt       DateTime?        @map("cancel_requested_at")
   rolledBackAt            DateTime?        @map("rolled_back_at")
   rollbackCustomers       Int              @default(0) @map("rollback_customers")
@@ -308,14 +328,38 @@ model ImportTask {
   deletedAt               DateTime?        @map("deleted_at")
   createdAt               DateTime         @default(now()) @map("created_at")
   updatedAt               DateTime         @updatedAt @map("updated_at")
+  leaseOwner              String?          @map("lease_owner") @db.VarChar(128)
+  leaseExpiresAt          DateTime?        @map("lease_expires_at")
+  heartbeatAt             DateTime?        @map("heartbeat_at")
+  idempotencyKey          String?          @map("idempotency_key") @db.Uuid
 
-  tenant    Tenant          @relation(fields: [tenantId], references: [id])
-  createdBy User            @relation("ImportTaskCreatedBy", fields: [createdById], references: [id])
-  rows      ImportTaskRow[]
+  tenant          Tenant            @relation(fields: [tenantId], references: [id])
+  createdBy       User              @relation("ImportTaskCreatedBy", fields: [createdById], references: [id])
+  rows            ImportTaskRow[]
+  source          ImportTaskSource?
+  customers       Customer[]        @relation("ImportTaskCustomers")
+  optometryOrders OptometryOrder[]  @relation("ImportTaskOptometryOrders")
 
+  @@unique([tenantId, idempotencyKey])
   @@index([tenantId, status, createdAt])
   @@index([createdById])
   @@map("import_tasks")
+}
+
+model ImportTaskSource {
+  taskId    String    @id @map("task_id") @db.Uuid
+  content   Bytes?    @db.ByteA
+  mimeType  String    @map("mime_type") @db.VarChar(160)
+  sizeBytes Int       @map("size_bytes")
+  sha256    String    @db.VarChar(64)
+  purgedAt  DateTime? @map("purged_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+
+  task ImportTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([sha256])
+  @@map("import_task_sources")
 }
 
 model ImportTaskRow {
@@ -328,6 +372,7 @@ model ImportTaskRow {
   optometryOrderId String?             @map("optometry_order_id") @db.Uuid
   errorMessage     String?             @map("error_message") @db.Text
   rawData          Json?               @map("raw_data")
+  idempotencyKey   String              @unique @map("idempotency_key") @db.VarChar(100)
   createdAt        DateTime            @default(now()) @map("created_at")
   updatedAt        DateTime            @updatedAt @map("updated_at")
 
@@ -338,7 +383,6 @@ model ImportTaskRow {
   @@index([importCustomerNo])
   @@map("import_task_rows")
 }
-
 
 model UserWechatBinding {
   id        String   @id @default(uuid()) @db.Uuid
@@ -356,18 +400,18 @@ model UserWechatBinding {
 }
 
 model WechatLoginSession {
-  id           String                   @id @default(uuid()) @db.Uuid
-  scene        String                   @unique @db.VarChar(32)
+  id           String                    @id @default(uuid()) @db.Uuid
+  scene        String                    @unique @db.VarChar(32)
   purpose      WechatLoginSessionPurpose
-  status       WechatLoginSessionStatus @default(pending)
-  targetUserId String?                  @map("target_user_id") @db.Uuid
-  userId       String?                  @map("user_id") @db.Uuid
-  openId       String?                  @map("open_id") @db.VarChar(128)
-  expiresAt    DateTime                 @map("expires_at")
-  confirmedAt  DateTime?                @map("confirmed_at")
-  consumedAt   DateTime?                @map("consumed_at")
-  createdAt    DateTime                 @default(now()) @map("created_at")
-  updatedAt    DateTime                 @updatedAt @map("updated_at")
+  status       WechatLoginSessionStatus  @default(pending)
+  targetUserId String?                   @map("target_user_id") @db.Uuid
+  userId       String?                   @map("user_id") @db.Uuid
+  openId       String?                   @map("open_id") @db.VarChar(128)
+  expiresAt    DateTime                  @map("expires_at")
+  confirmedAt  DateTime?                 @map("confirmed_at")
+  consumedAt   DateTime?                 @map("consumed_at")
+  createdAt    DateTime                  @default(now()) @map("created_at")
+  updatedAt    DateTime                  @updatedAt @map("updated_at")
 
   targetUser User? @relation("WechatLoginSessionTargetUser", fields: [targetUserId], references: [id], onDelete: Cascade)
   user       User? @relation("WechatLoginSessionUser", fields: [userId], references: [id], onDelete: SetNull)

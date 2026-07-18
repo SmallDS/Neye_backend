@@ -3,6 +3,7 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  GatewayTimeoutException,
   Injectable,
   NotFoundException,
   ServiceUnavailableException,
@@ -17,22 +18,33 @@ import {
   WechatLoginSessionStatus,
 } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
-import { randomBytes } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import { CurrentUser } from '../common/types/current-user';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthService } from './auth.service';
 import { WechatBindAccountDto } from './dto/wechat-bind-account.dto';
 import { WechatMiniLoginDto } from './dto/wechat-mini-login.dto';
+import { WechatSessionDecisionDto } from './dto/wechat-session-decision.dto';
 
 const WECHAT_AUTH_KEY = 'wechat_auth';
 const SESSION_TTL_MS = 2 * 60 * 1000;
 const BINDING_TOKEN_TTL = '10m';
+const CONFIRMATION_TOKEN_TTL = '3m';
+const DEFAULT_WECHAT_TIMEOUT_MS = 8_000;
 
 interface BindingTokenPayload {
   purpose: 'wechat-bind';
   appId: string;
   openId: string;
   scene?: string;
+}
+
+interface ConfirmationTokenPayload {
+  purpose: 'wechat-login-confirm';
+  sessionId: string;
+  userId: string;
+  appId: string;
+  openId: string;
 }
 
 interface WechatCodeSession {
@@ -50,7 +62,8 @@ interface WechatAccessToken {
 
 @Injectable()
 export class WechatAuthService {
-  private cachedAccessToken: { token: string; expiresAt: number } | null = null;
+  private readonly accessTokenCache = new Map<string, { token: string; expiresAt: number }>();
+  private readonly accessTokenRequests = new Map<string, Promise<string>>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -80,8 +93,8 @@ export class WechatAuthService {
     if (!session) throw new NotFoundException('Wechat login session not found');
 
     if (session.expiresAt <= new Date() && !this.isTerminal(session.status)) {
-      await this.prisma.wechatLoginSession.update({
-        where: { id: session.id },
+      await this.prisma.wechatLoginSession.updateMany({
+        where: { id: session.id, status: session.status },
         data: { status: WechatLoginSessionStatus.expired },
       });
       return { status: WechatLoginSessionStatus.expired };
@@ -114,7 +127,7 @@ export class WechatAuthService {
     if (session?.purpose === WechatLoginSessionPurpose.bind) {
       if (!session.targetUserId) throw new BadRequestException('Binding session has no target account');
       await this.bindIdentity(session.targetUserId, identity.appId, identity.openId);
-      await this.confirmSession(session.id, session.targetUserId, identity.openId);
+      await this.confirmBindingSession(session.id, session.targetUserId, identity.openId);
       return { status: 'web_confirmed' };
     }
 
@@ -125,10 +138,20 @@ export class WechatAuthService {
 
     if (!binding || binding.user.status !== UserStatus.active) {
       if (session) {
-        await this.prisma.wechatLoginSession.update({
-          where: { id: session.id },
+        const claimed = await this.prisma.wechatLoginSession.updateMany({
+          where: {
+            id: session.id,
+            purpose: WechatLoginSessionPurpose.login,
+            status: { in: [WechatLoginSessionStatus.pending, WechatLoginSessionStatus.binding_required] },
+            userId: null,
+            OR: [{ openId: null }, { openId: identity.openId }],
+            expiresAt: { gt: new Date() },
+          },
           data: { status: WechatLoginSessionStatus.binding_required, openId: identity.openId },
         });
+        if (claimed.count !== 1) {
+          throw new BadRequestException('Wechat login request was already scanned by another user');
+        }
       }
       return {
         status: 'binding_required',
@@ -144,9 +167,16 @@ export class WechatAuthService {
       };
     }
 
-    if (session) await this.confirmSession(session.id, binding.userId, identity.openId);
+    if (session) {
+      return this.stageLoginConfirmation(
+        session.id,
+        binding.userId,
+        binding.user.displayName,
+        identity.appId,
+        identity.openId,
+      );
+    }
     if (binding.user.role === UserRole.admin) {
-      if (session) return { status: 'web_confirmed' };
       throw new ForbiddenException('Administrator accounts are not available in the mini program');
     }
 
@@ -188,14 +218,62 @@ export class WechatAuthService {
     await this.bindIdentity(user.id, payload.appId, payload.openId);
     if (payload.scene) {
       const session = await this.getActiveSession(payload.scene);
-      await this.confirmSession(session.id, user.id, payload.openId);
+      if (session.purpose !== WechatLoginSessionPurpose.login) {
+        throw new BadRequestException('Wechat login session purpose is invalid');
+      }
+      return this.stageLoginConfirmation(
+        session.id,
+        user.id,
+        user.displayName,
+        payload.appId,
+        payload.openId,
+      );
     }
 
-    if (user.role === UserRole.admin) return { status: 'web_confirmed' };
     return {
       status: 'authenticated',
       ...(await this.authService.loginByUserId(user.id)),
     };
+  }
+
+  async decideLoginSession(id: string, dto: WechatSessionDecisionDto) {
+    let payload: ConfirmationTokenPayload;
+    try {
+      payload = await this.jwtService.verifyAsync<ConfirmationTokenPayload>(dto.confirmationToken);
+    } catch {
+      throw new UnauthorizedException('Wechat confirmation token is invalid or expired');
+    }
+    if (
+      payload.purpose !== 'wechat-login-confirm' ||
+      payload.sessionId !== id ||
+      !payload.userId ||
+      !payload.appId ||
+      !payload.openId
+    ) {
+      throw new UnauthorizedException('Wechat confirmation token is invalid');
+    }
+
+    const now = new Date();
+    const commonWhere = {
+      id,
+      purpose: WechatLoginSessionPurpose.login,
+      status: WechatLoginSessionStatus.binding_required,
+      userId: payload.userId,
+      openId: payload.openId,
+      expiresAt: { gt: now },
+    };
+    const updated = await this.prisma.wechatLoginSession.updateMany({
+      where: commonWhere,
+      data:
+        dto.decision === 'confirm'
+          ? { status: WechatLoginSessionStatus.confirmed, confirmedAt: now }
+          : { status: WechatLoginSessionStatus.consumed, consumedAt: now },
+    });
+    if (updated.count !== 1) {
+      throw new BadRequestException('Wechat login request has expired or was already decided');
+    }
+
+    return { status: dto.decision === 'confirm' ? 'web_confirmed' : 'web_rejected' };
   }
 
   async bindCurrentUser(currentUser: CurrentUser, code: string) {
@@ -248,10 +326,13 @@ export class WechatAuthService {
     url.searchParams.set('secret', config.secret);
     url.searchParams.set('js_code', code);
     url.searchParams.set('grant_type', 'authorization_code');
-    const response = await fetch(url);
-    const body = (await response.json()) as WechatCodeSession;
+    const response = await this.fetchWechat(url, {}, 'Wechat code exchange');
+    const body = await this.readWechatJson<WechatCodeSession>(response, 'Wechat code exchange');
     if (!response.ok || body.errcode || !body.openid) {
-      throw new UnauthorizedException(`Wechat login failed: ${body.errmsg ?? body.errcode ?? response.status}`);
+      if (body.errcode === 40029 || body.errcode === 40163) {
+        throw new UnauthorizedException('Wechat login code is invalid or already used');
+      }
+      throw new BadGatewayException(this.wechatApiError('Wechat code exchange', response, body.errcode));
     }
     return { appId: config.appId, openId: body.openid };
   }
@@ -263,7 +344,7 @@ export class WechatAuthService {
     scene: string,
   ) {
     const accessToken = await this.getAccessToken(appId, secret);
-    const response = await fetch(
+    const response = await this.fetchWechat(
       `https://api.weixin.qq.com/wxa/getwxacodeunlimit?access_token=${encodeURIComponent(accessToken)}`,
       {
         method: 'POST',
@@ -276,34 +357,105 @@ export class WechatAuthService {
           width: 280,
         }),
       },
+      'Wechat QR code generation',
     );
     const contentType = response.headers.get('content-type') ?? '';
     if (!response.ok || contentType.includes('application/json')) {
-      const body = await response.text();
-      throw new BadGatewayException(`Wechat QR code generation failed: ${body.slice(0, 200)}`);
+      let errorCode: number | undefined;
+      try {
+        const body = (await response.json()) as { errcode?: number };
+        errorCode = body.errcode;
+      } catch {
+        // The upstream may return a non-JSON error body. Do not expose it to clients.
+      }
+      throw new BadGatewayException(this.wechatApiError('Wechat QR code generation', response, errorCode));
     }
     const bytes = Buffer.from(await response.arrayBuffer());
     return `data:image/png;base64,${bytes.toString('base64')}`;
   }
 
   private async getAccessToken(appId: string, secret: string) {
-    if (this.cachedAccessToken && this.cachedAccessToken.expiresAt > Date.now() + 60_000) {
-      return this.cachedAccessToken.token;
-    }
+    const cacheKey = this.accessTokenCacheKey(appId, secret);
+    const cached = this.accessTokenCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now() + 60_000) return cached.token;
+
+    const existingRequest = this.accessTokenRequests.get(cacheKey);
+    if (existingRequest) return existingRequest;
+
+    const request = this.loadAccessToken(appId, secret, cacheKey).finally(() => {
+      this.accessTokenRequests.delete(cacheKey);
+    });
+    this.accessTokenRequests.set(cacheKey, request);
+    return request;
+  }
+
+  private async loadAccessToken(appId: string, secret: string, cacheKey: string) {
     const url = new URL('https://api.weixin.qq.com/cgi-bin/token');
     url.searchParams.set('grant_type', 'client_credential');
     url.searchParams.set('appid', appId);
     url.searchParams.set('secret', secret);
-    const response = await fetch(url);
-    const body = (await response.json()) as WechatAccessToken;
+    const response = await this.fetchWechat(url, {}, 'Wechat access token request');
+    const body = await this.readWechatJson<WechatAccessToken>(response, 'Wechat access token request');
     if (!response.ok || body.errcode || !body.access_token) {
-      throw new BadGatewayException(`Wechat access token failed: ${body.errmsg ?? body.errcode ?? response.status}`);
+      throw new BadGatewayException(this.wechatApiError('Wechat access token request', response, body.errcode));
     }
-    this.cachedAccessToken = {
+    this.pruneAccessTokenCache();
+    this.accessTokenCache.set(cacheKey, {
       token: body.access_token,
       expiresAt: Date.now() + Math.max(60, body.expires_in ?? 7200) * 1000,
-    };
+    });
     return body.access_token;
+  }
+
+  private async fetchWechat(input: string | URL, init: RequestInit, operation: string) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.wechatTimeoutMs());
+    try {
+      return await fetch(input, { ...init, signal: controller.signal });
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw new GatewayTimeoutException(`${operation} timed out`);
+      }
+      throw new BadGatewayException(`${operation} could not reach Wechat`);
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private async readWechatJson<T>(response: Response, operation: string) {
+    try {
+      return (await response.json()) as T;
+    } catch {
+      throw new BadGatewayException(`${operation} returned an invalid response`);
+    }
+  }
+
+  private wechatApiError(operation: string, response: Response, errorCode?: number) {
+    const detail = errorCode === undefined ? `HTTP ${response.status}` : `code ${errorCode}`;
+    return `${operation} failed (${detail})`;
+  }
+
+  private wechatTimeoutMs() {
+    const configured = Number(process.env.WECHAT_API_TIMEOUT_MS ?? DEFAULT_WECHAT_TIMEOUT_MS);
+    if (!Number.isFinite(configured)) return DEFAULT_WECHAT_TIMEOUT_MS;
+    return Math.min(30_000, Math.max(1_000, configured));
+  }
+
+  private accessTokenCacheKey(appId: string, secret: string) {
+    const secretFingerprint = createHash('sha256').update(secret).digest('hex');
+    return `${appId}:${secretFingerprint}`;
+  }
+
+  private pruneAccessTokenCache() {
+    const now = Date.now();
+    for (const [key, cached] of this.accessTokenCache) {
+      if (cached.expiresAt <= now) this.accessTokenCache.delete(key);
+    }
+    while (this.accessTokenCache.size >= 8) {
+      const oldestKey = this.accessTokenCache.keys().next().value as string | undefined;
+      if (!oldestKey) break;
+      this.accessTokenCache.delete(oldestKey);
+    }
   }
 
   private async getActiveSession(scene: string) {
@@ -315,19 +467,69 @@ export class WechatAuthService {
         session.status !== WechatLoginSessionStatus.binding_required)
     ) {
       if (session.expiresAt <= new Date() && !this.isTerminal(session.status)) {
-        await this.prisma.wechatLoginSession.update({
-          where: { id: session.id },
+        await this.prisma.wechatLoginSession.updateMany({
+          where: { id: session.id, status: session.status },
           data: { status: WechatLoginSessionStatus.expired },
         });
       }
-      throw new BadRequestException('Wechat login session has expired');
+      throw new BadRequestException('Wechat login session has expired or was already used');
     }
     return session;
   }
 
-  private async confirmSession(id: string, userId: string, openId: string) {
-    await this.prisma.wechatLoginSession.update({
-      where: { id },
+  private async stageLoginConfirmation(
+    sessionId: string,
+    userId: string,
+    displayName: string,
+    appId: string,
+    openId: string,
+  ) {
+    const staged = await this.prisma.wechatLoginSession.updateMany({
+      where: {
+        id: sessionId,
+        purpose: WechatLoginSessionPurpose.login,
+        status: { in: [WechatLoginSessionStatus.pending, WechatLoginSessionStatus.binding_required] },
+        userId: null,
+        OR: [{ openId: null }, { openId }],
+        expiresAt: { gt: new Date() },
+      },
+      data: {
+        status: WechatLoginSessionStatus.binding_required,
+        userId,
+        openId,
+      },
+    });
+    if (staged.count !== 1) {
+      throw new BadRequestException('Wechat login request has expired or was already used');
+    }
+
+    return {
+      status: 'confirmation_required',
+      sessionId,
+      accountName: displayName,
+      confirmationToken: await this.jwtService.signAsync(
+        {
+          purpose: 'wechat-login-confirm',
+          sessionId,
+          userId,
+          appId,
+          openId,
+        } satisfies ConfirmationTokenPayload,
+        { expiresIn: CONFIRMATION_TOKEN_TTL as never },
+      ),
+    };
+  }
+
+  private async confirmBindingSession(id: string, userId: string, openId: string) {
+    const confirmed = await this.prisma.wechatLoginSession.updateMany({
+      where: {
+        id,
+        purpose: WechatLoginSessionPurpose.bind,
+        status: { in: [WechatLoginSessionStatus.pending, WechatLoginSessionStatus.binding_required] },
+        userId: null,
+        OR: [{ openId: null }, { openId }],
+        expiresAt: { gt: new Date() },
+      },
       data: {
         status: WechatLoginSessionStatus.confirmed,
         userId,
@@ -335,6 +537,9 @@ export class WechatAuthService {
         confirmedAt: new Date(),
       },
     });
+    if (confirmed.count !== 1) {
+      throw new BadRequestException('Wechat binding request has expired or was already used');
+    }
   }
 
   private async bindIdentity(userId: string, appId: string, openId: string) {
@@ -385,11 +590,11 @@ export class WechatAuthService {
     return {
       enabled: value.enabled === true,
       appId: typeof value.appId === 'string' ? value.appId.trim() : '',
-      secret:
-        typeof value.appSecret === 'string' ? value.appSecret.trim() : '',
+      secret: typeof value.appSecret === 'string' ? value.appSecret.trim() : '',
       envVersion,
     };
   }
+
   private isTerminal(status: WechatLoginSessionStatus) {
     return status === WechatLoginSessionStatus.consumed || status === WechatLoginSessionStatus.expired;
   }

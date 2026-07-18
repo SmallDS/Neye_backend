@@ -12,6 +12,8 @@
                     "test":  "jest --runInBand",
                     "prisma:generate":  "prisma generate",
                     "db:push":  "prisma db push",
+                    "db:migrate:deploy":  "prisma migrate deploy",
+                    "db:migrate:status":  "prisma migrate status",
                     "db:seed":  "prisma db seed",
                     "db:backfill-customer-pinyin":  "ts-node prisma/backfill-customer-pinyin.ts",
                     "db:backfill-user-tenants":  "ts-node prisma/backfill-user-tenants.ts"

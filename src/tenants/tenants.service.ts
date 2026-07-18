@@ -1,12 +1,12 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, UserRole } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
-import { BatchDeleteDto } from '../common/dto/batch-delete.dto';
 import { createOrderNo } from '../common/order-number';
 import { toPageResult } from '../common/dto/page.dto';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateTenantDto } from './dto/create-tenant.dto';
 import { CreateTenantUserDto } from './dto/create-tenant-user.dto';
+import { BatchTenantDeleteDto } from './dto/dangerous-tenant-operation.dto';
 import { ResetTenantUserPasswordDto } from './dto/reset-tenant-user-password.dto';
 import { TenantQueryDto } from './dto/tenant-query.dto';
 import { UpdateTenantDto } from './dto/update-tenant.dto';
@@ -112,6 +112,7 @@ export class TenantsService {
       const existed = await this.prisma.user.findUnique({ where: { username: account.username } });
       if (existed) throw new ConflictException('Account username already exists');
     }
+    const passwordHash = account ? await bcrypt.hash(account.password, 10) : undefined;
 
     return this.prisma.$transaction(async (tx) => {
       const tenant = await tx.tenant.create({
@@ -122,12 +123,11 @@ export class TenantsService {
           contactPhone: dto.contactPhone,
         },
       });
-
-      const user = account
+      const user = account && passwordHash
         ? await tx.user.create({
             data: {
               username: account.username,
-              passwordHash: await bcrypt.hash(account.password, 10),
+              passwordHash,
               displayName: account.displayName,
               role: UserRole.staff,
               tenantMemberships: { create: { tenantId: tenant.id } },
@@ -135,16 +135,17 @@ export class TenantsService {
             select: userSelect,
           })
         : undefined;
-
       return { tenantId: tenant.id, tenantCode: tenant.code, accountUserId: user?.id };
     });
   }
-
   async update(id: string, dto: UpdateTenantDto) {
     await this.ensureTenant(id);
-    return this.prisma.tenant.update({ where: { id }, data: dto });
-  }
 
+    return this.prisma.$transaction(async (tx) => {
+      const tenant = await tx.tenant.update({ where: { id }, data: dto });
+      return tenant;
+    });
+  }
   async listUsers(id: string) {
     await this.ensureTenant(id);
     const memberships = await this.prisma.userTenant.findMany({
@@ -163,13 +164,15 @@ export class TenantsService {
       if (!user) throw new NotFoundException('Account not found');
       if (user.role === UserRole.admin) throw new BadRequestException('Admin accounts do not need tenant assignments');
 
-      const membership = await this.prisma.userTenant.upsert({
-        where: { userId_tenantId: { userId: user.id, tenantId: id } },
-        create: { userId: user.id, tenantId: id },
-        update: {},
-        include: { user: { select: userSelect } },
+      return this.prisma.$transaction(async (tx) => {
+        const membership = await tx.userTenant.upsert({
+          where: { userId_tenantId: { userId: user.id, tenantId: id } },
+          create: { userId: user.id, tenantId: id },
+          update: {},
+          include: { user: { select: userSelect } },
+        });
+        return this.serializeMembership(membership);
       });
-      return this.serializeMembership(membership);
     }
 
     if (!dto.username || !dto.password || !dto.displayName) {
@@ -177,44 +180,51 @@ export class TenantsService {
     }
     const existed = await this.prisma.user.findUnique({ where: { username: dto.username } });
     if (existed) throw new ConflictException('Account username already exists');
+    const passwordHash = await bcrypt.hash(dto.password, 10);
 
-    const user = await this.prisma.user.create({
-      data: {
-        username: dto.username,
-        passwordHash: await bcrypt.hash(dto.password, 10),
-        displayName: dto.displayName,
-        role: UserRole.staff,
-        tenantMemberships: { create: { tenantId: id } },
-      },
-      select: userSelect,
+    return this.prisma.$transaction(async (tx) => {
+      const user = await tx.user.create({
+        data: {
+          username: dto.username!,
+          passwordHash,
+          displayName: dto.displayName!,
+          role: UserRole.staff,
+          tenantMemberships: { create: { tenantId: id } },
+        },
+        select: userSelect,
+      });
+      return { ...user, tenantId: id, assignedAt: user.createdAt };
     });
-    return { ...user, tenantId: id, assignedAt: user.createdAt };
   }
 
   async updateUser(tenantId: string, userId: string, dto: UpdateTenantUserDto) {
     await this.ensureMembership(tenantId, userId);
-    const user = await this.prisma.user.update({ where: { id: userId }, data: dto, select: userSelect });
-    const membership = await this.prisma.userTenant.findUniqueOrThrow({
-      where: { userId_tenantId: { userId, tenantId } },
+    return this.prisma.$transaction(async (tx) => {
+      const user = await tx.user.update({ where: { id: userId }, data: dto, select: userSelect });
+      const assignment = await tx.userTenant.findUniqueOrThrow({ where: { userId_tenantId: { userId, tenantId } } });
+      return { ...user, tenantId, assignedAt: assignment.assignedAt };
     });
-    return { ...user, tenantId, assignedAt: membership.assignedAt };
   }
-
-  async resetUserPassword(tenantId: string, userId: string, dto: ResetTenantUserPasswordDto) {
+  async resetUserPassword(
+    tenantId: string,
+    userId: string,
+    dto: ResetTenantUserPasswordDto,
+  ) {
     const membership = await this.ensureMembership(tenantId, userId);
-    await this.prisma.user.update({
-      where: { id: userId },
-      data: { passwordHash: await bcrypt.hash(dto.password, 10) },
+    const passwordHash = await bcrypt.hash(dto.password, 10);
+    await this.prisma.$transaction(async (tx) => {
+      await tx.user.update({ where: { id: userId }, data: { passwordHash } });
     });
     return { tenantId, userId, username: membership.user.username };
   }
 
   async removeUser(tenantId: string, userId: string) {
     await this.ensureMembership(tenantId, userId);
-    await this.prisma.userTenant.delete({ where: { userId_tenantId: { userId, tenantId } } });
+    await this.prisma.$transaction(async (tx) => {
+      await tx.userTenant.delete({ where: { userId_tenantId: { userId, tenantId } } });
+    });
     return { tenantId, userId };
   }
-
   async resetAdminPassword(id: string, password: string) {
     await this.ensureTenant(id);
     const membership = await this.prisma.userTenant.findFirst({
@@ -224,9 +234,9 @@ export class TenantsService {
     });
     if (!membership) throw new NotFoundException('Tenant account not found');
 
-    await this.prisma.user.update({
-      where: { id: membership.userId },
-      data: { passwordHash: await bcrypt.hash(password, 10) },
+    const passwordHash = await bcrypt.hash(password, 10);
+    await this.prisma.$transaction(async (tx) => {
+      await tx.user.update({ where: { id: membership.userId }, data: { passwordHash } });
     });
     return { tenantId: id, accountUserId: membership.userId, username: membership.user.username };
   }
@@ -235,7 +245,7 @@ export class TenantsService {
     return this.deleteTenantTree([id]);
   }
 
-  async removeMany(dto: BatchDeleteDto) {
+  async removeMany(dto: BatchTenantDeleteDto) {
     return this.deleteTenantTree(dto.ids);
   }
 

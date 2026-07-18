@@ -17,4 +17,5 @@ export class UpdateTenantDto {
   @IsOptional()
   @IsEnum(TenantStatus)
   status?: TenantStatus;
+
 }

@@ -11,8 +11,23 @@ function configuredCorsOrigins() {
     .filter(Boolean);
 }
 
+function configuredTrustProxyHops() {
+  const hops = Number(process.env.TRUST_PROXY_HOPS ?? 0);
+  if (!Number.isInteger(hops) || hops < 0 || hops > 10) {
+    throw new Error('TRUST_PROXY_HOPS must be an integer between 0 and 10');
+  }
+  return hops;
+}
+
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+  app.enableShutdownHooks();
+
+  const trustProxyHops = configuredTrustProxyHops();
+  if (trustProxyHops > 0) {
+    const httpServer = app.getHttpAdapter().getInstance() as { set(name: string, value: number): void };
+    httpServer.set('trust proxy', trustProxyHops);
+  }
 
   const corsOrigins = configuredCorsOrigins();
   if (process.env.NODE_ENV === 'production' && corsOrigins.length === 0) {

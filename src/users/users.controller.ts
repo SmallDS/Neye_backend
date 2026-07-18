@@ -7,6 +7,7 @@ import { AuthGuard } from '../common/guards/auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { CurrentUser } from '../common/types/current-user';
 import { AssignUserTenantsDto } from './dto/assign-user-tenants.dto';
+import { BatchUserStatusDto } from './dto/batch-user-status.dto';
 import { CreateUserDto } from './dto/create-user.dto';
 import { ResetUserPasswordDto } from './dto/reset-user-password.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
@@ -29,6 +30,11 @@ export class UsersController {
   @Post()
   create(@Body() dto: CreateUserDto) {
     return this.usersService.create(dto);
+  }
+
+  @Post('batch-status')
+  batchStatus(@CurrentUserContext() user: CurrentUser, @Body() dto: BatchUserStatusDto) {
+    return this.usersService.batchStatus(user, dto);
   }
 
   @Get(':id')

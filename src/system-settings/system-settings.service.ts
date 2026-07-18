@@ -48,16 +48,17 @@ export class SystemSettingsService {
     };
   }
 
-  async updateWechatAuth(value: {
-    appId?: string;
-    appSecret?: string;
-    clearSecret?: boolean;
-    enabled: boolean;
-    envVersion?: WechatEnvVersion;
-  }) {
+  async updateWechatAuth(
+    value: {
+      appId?: string;
+      appSecret?: string;
+      clearSecret?: boolean;
+      enabled: boolean;
+      envVersion?: WechatEnvVersion;
+    },
+  ) {
     const current = await this.getWechatAuthValue();
     let appSecret = current.appSecret;
-
     if (value.clearSecret === true) {
       appSecret = undefined;
     } else if (value.appSecret?.trim()) {
@@ -70,17 +71,16 @@ export class SystemSettingsService {
       envVersion: this.normalizeEnvVersion(value.envVersion),
       ...(appSecret ? { appSecret } : {}),
     };
-    await this.prisma.systemSetting.upsert({
-      where: { key: WECHAT_AUTH_KEY },
-      create: {
-        key: WECHAT_AUTH_KEY,
-        value: normalized as Prisma.InputJsonValue,
-      },
-      update: { value: normalized as Prisma.InputJsonValue },
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.systemSetting.upsert({
+        where: { key: WECHAT_AUTH_KEY },
+        create: { key: WECHAT_AUTH_KEY, value: normalized as Prisma.InputJsonValue },
+        update: { value: normalized as Prisma.InputJsonValue },
+      });
     });
     return this.getWechatAuth();
   }
-
   async getOptometryStyle() {
     const setting = await this.prisma.systemSetting.findUnique({
       where: { key: OPTOMETRY_STYLE_KEY },
@@ -92,17 +92,16 @@ export class SystemSettingsService {
 
   async updateOptometryStyle(value: Record<string, unknown>) {
     const normalized = this.normalizeOptometryStyle(value);
-    const setting = await this.prisma.systemSetting.upsert({
-      where: { key: OPTOMETRY_STYLE_KEY },
-      create: {
-        key: OPTOMETRY_STYLE_KEY,
-        value: normalized as Prisma.InputJsonValue,
-      },
-      update: { value: normalized as Prisma.InputJsonValue },
+    const result = await this.prisma.$transaction(async (tx) => {
+      const setting = await tx.systemSetting.upsert({
+        where: { key: OPTOMETRY_STYLE_KEY },
+        create: { key: OPTOMETRY_STYLE_KEY, value: normalized as Prisma.InputJsonValue },
+        update: { value: normalized as Prisma.InputJsonValue },
+      });
+      return setting.value;
     });
-    return setting.value;
+    return result;
   }
-
   private async getWechatAuthValue() {
     const setting = await this.prisma.systemSetting.findUnique({
       where: { key: WECHAT_AUTH_KEY },

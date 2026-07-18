@@ -4,6 +4,7 @@ import { Test } from '@nestjs/testing';
 import { Prisma, PrismaClient, UserRole } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
 import * as XLSX from 'xlsx';
+import { randomUUID } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import { AppModule } from '../src/app.module';
 
@@ -253,6 +254,7 @@ describe('NEye MVP API e2e', () => {
     const workbook = createCustomerOptometryWorkbook();
     const formData = new FormData();
     formData.append('tenantId', tenantId);
+    formData.append('idempotencyKey', randomUUID());
     formData.append('file', new Blob([new Uint8Array(workbook)], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), 'customer-optometry.xlsx');
     return formData;
   }
@@ -492,7 +494,7 @@ describe('NEye MVP API e2e', () => {
       token: systemLogin.accessToken,
     });
     expect(importTask.tenantId).toBe(tenantA.tenantId);
-    expect(importTask.totalRows).toBe(4);
+    expect(importTask.totalRows).toBe(0);
 
     const finishedImportTask = await waitForImportTask(importTask.id, systemLogin.accessToken);
     expect(finishedImportTask.status).toBe('completed');

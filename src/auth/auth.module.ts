@@ -1,5 +1,6 @@
 import { Global, Module } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
+import { InMemoryRateLimiter } from '../common/security/in-memory-rate-limiter';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { WechatAuthService } from './wechat-auth.service';
@@ -18,7 +19,7 @@ if (process.env.NODE_ENV === 'production' && (!jwtSecret || /dev-only|change-me/
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, WechatAuthService],
+  providers: [AuthService, WechatAuthService, InMemoryRateLimiter],
   exports: [JwtModule],
 })
 export class AuthModule {}

@@ -9,6 +9,7 @@ import { RolesGuard } from '../common/guards/roles.guard';
 import { CurrentUser } from '../common/types/current-user';
 import { CreateImportTaskDto } from './dto/create-import-task.dto';
 import { ImportTaskQueryDto } from './dto/import-task-query.dto';
+import { IMPORT_CAPABILITIES, MAX_IMPORT_FILE_BYTES } from './import-file-validation';
 import { ImportTasksService } from './import-tasks.service';
 
 @ApiTags('import-tasks')
@@ -22,10 +23,15 @@ export class ImportTasksController {
   @Get('template/customer-optometry')
   downloadCustomerOptometryTemplate(@Res() response: any) {
     const buffer = this.importTasksService.createCustomerOptometryTemplate();
-    const fileName = encodeURIComponent('客户验光单导入模板.xlsx');
+    const fileName = encodeURIComponent('\u5ba2\u6237\u9a8c\u5149\u5355\u5bfc\u5165\u6a21\u677f.xlsx');
     response.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    response.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${fileName}`);
+    response.setHeader('Content-Disposition', `attachment; filename="customer-optometry-import-template.xlsx"; filename*=UTF-8''${fileName}`);
     response.send(buffer);
+  }
+
+  @Get('capabilities')
+  capabilities() {
+    return IMPORT_CAPABILITIES;
   }
 
   @Get()
@@ -34,13 +40,21 @@ export class ImportTasksController {
   }
 
   @Post('customer-optometry')
-  @UseInterceptors(FileInterceptor('file'))
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_IMPORT_FILE_BYTES, files: 1 } }))
   createCustomerOptometryTask(
     @CurrentUserContext() user: CurrentUser,
     @Body() dto: CreateImportTaskDto,
     @UploadedFile() file: any,
   ) {
     return this.importTasksService.createCustomerOptometryTask(user, dto, file);
+  }
+
+  @Get(':id/error-report')
+  async errorReport(@Param('id') id: string, @Res() response: any) {
+    const report = await this.importTasksService.createErrorReport(id);
+    response.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    response.setHeader('Content-Disposition', `attachment; filename="import-${id}-errors.csv"`);
+    response.send(report);
   }
 
   @Get(':id')

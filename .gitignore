@@ -12,3 +12,4 @@ pnpm-debug.log*
 !.env.example
 !.env.docker.example
 .DS_Store
+.codex-backend.pid

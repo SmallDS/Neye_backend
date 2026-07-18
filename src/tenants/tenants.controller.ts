@@ -2,11 +2,11 @@ import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } f
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { UserRole } from '@prisma/client';
 import { Roles } from '../common/decorators/roles.decorator';
-import { BatchDeleteDto } from '../common/dto/batch-delete.dto';
 import { AuthGuard } from '../common/guards/auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { CreateTenantDto } from './dto/create-tenant.dto';
 import { CreateTenantUserDto } from './dto/create-tenant-user.dto';
+import { BatchTenantDeleteDto } from './dto/dangerous-tenant-operation.dto';
 import { ResetTenantAdminPasswordDto } from './dto/reset-tenant-admin-password.dto';
 import { ResetTenantUserPasswordDto } from './dto/reset-tenant-user-password.dto';
 import { TenantQueryDto } from './dto/tenant-query.dto';
@@ -33,7 +33,7 @@ export class TenantsController {
   }
 
   @Post('batch-delete')
-  removeMany(@Body() dto: BatchDeleteDto) {
+  removeMany(@Body() dto: BatchTenantDeleteDto) {
     return this.tenantsService.removeMany(dto);
   }
 

@@ -5,6 +5,7 @@ import { toPageResult } from '../common/dto/page.dto';
 import { CurrentUser } from '../common/types/current-user';
 import { PrismaService } from '../prisma/prisma.service';
 import { AssignUserTenantsDto } from './dto/assign-user-tenants.dto';
+import { BatchUserStatusDto } from './dto/batch-user-status.dto';
 import { CreateUserDto } from './dto/create-user.dto';
 import { ResetUserPasswordDto } from './dto/reset-user-password.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
@@ -72,45 +73,69 @@ export class UsersService {
     await this.ensureTenants(tenantIds);
     const existed = await this.prisma.user.findUnique({ where: { username: dto.username } });
     if (existed) throw new ConflictException('Account username already exists');
+    const passwordHash = await bcrypt.hash(dto.password, 10);
 
-    const account = await this.prisma.user.create({
-      data: {
-        username: dto.username,
-        passwordHash: await bcrypt.hash(dto.password, 10),
-        displayName: dto.displayName,
-        role,
-        tenantMemberships: tenantIds.length
-          ? { create: tenantIds.map((tenantId) => ({ tenantId })) }
-          : undefined,
-      },
-      select: accountSelect,
+    const account = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.user.create({
+        data: {
+          username: dto.username,
+          passwordHash,
+          displayName: dto.displayName,
+          role,
+          tenantMemberships: tenantIds.length ? { create: tenantIds.map((tenantId) => ({ tenantId })) } : undefined,
+        },
+        select: accountSelect,
+      });
+      return created;
+    });
+    return this.serialize(account);
+  }
+  async update(actor: CurrentUser, id: string, dto: UpdateUserDto) {
+    const current = await this.findAccount(id);
+    const disablesAdmin =
+      current.role === UserRole.admin &&
+      current.status === UserStatus.active &&
+      (dto.status === UserStatus.disabled || dto.role === UserRole.staff);
+    if (actor.id === id && disablesAdmin) {
+      throw new BadRequestException('Cannot disable or demote the current admin account');
+    }
+
+    const account = await this.prisma.$transaction(async (tx) => {
+      if (disablesAdmin) await this.ensureAnotherActiveAdmin(tx, [id]);
+      if (dto.role === UserRole.admin && current.role !== UserRole.admin) {
+        await tx.userTenant.deleteMany({ where: { userId: id } });
+      }
+      const updated = await tx.user.update({ where: { id }, data: dto, select: accountSelect });
+      if (dto.role !== undefined || dto.status !== undefined) {
+      }
+      return updated;
     });
     return this.serialize(account);
   }
 
-  async update(actor: CurrentUser, id: string, dto: UpdateUserDto) {
-    if (actor.id === id && (dto.status === UserStatus.disabled || dto.role === UserRole.staff)) {
-      throw new BadRequestException('Cannot disable or demote the current admin account');
+  async batchStatus(actor: CurrentUser, dto: BatchUserStatusDto) {
+    const userIds = [...new Set(dto.userIds)];
+    if (dto.status === UserStatus.disabled && userIds.includes(actor.id)) {
+      throw new BadRequestException('Cannot disable the current admin account');
     }
-    const current = await this.findAccount(id);
-    const account = await this.prisma.$transaction(async (tx) => {
-      if (dto.role === UserRole.admin && current.role !== UserRole.admin) {
-        await tx.userTenant.deleteMany({ where: { userId: id } });
-      }
-      return tx.user.update({
-        where: { id },
-        data: dto,
-        select: accountSelect,
-      });
+    return this.prisma.$transaction(async (tx) => {
+      const users = await tx.user.findMany({ where: { id: { in: userIds } }, select: { id: true, role: true, status: true } });
+      if (users.length !== userIds.length) throw new NotFoundException('Some accounts are not found');
+      const disabledActiveAdminIds = users
+        .filter((user) => user.role === UserRole.admin && user.status === UserStatus.active && dto.status === UserStatus.disabled)
+        .map((user) => user.id);
+      if (disabledActiveAdminIds.length > 0) await this.ensureAnotherActiveAdmin(tx, disabledActiveAdminIds);
+
+      const result = await tx.user.updateMany({ where: { id: { in: userIds } }, data: { status: dto.status } });
+      return { updatedCount: result.count, status: dto.status, userIds };
     });
-    return this.serialize(account);
   }
 
   async resetPassword(id: string, dto: ResetUserPasswordDto) {
     const account = await this.findAccount(id);
-    await this.prisma.user.update({
-      where: { id },
-      data: { passwordHash: await bcrypt.hash(dto.password, 10) },
+    const passwordHash = await bcrypt.hash(dto.password, 10);
+    await this.prisma.$transaction(async (tx) => {
+      await tx.user.update({ where: { id }, data: { passwordHash } });
     });
     return { userId: id, username: account.username };
   }
@@ -123,22 +148,26 @@ export class UsersService {
 
     const tenantIds = [...new Set(dto.tenantIds)];
     await this.ensureTenants(tenantIds);
-    await this.prisma.$transaction([
-      this.prisma.userTenant.deleteMany({
-        where: {
-          userId: id,
-          ...(tenantIds.length ? { tenantId: { notIn: tenantIds } } : {}),
-        },
-      }),
-      ...tenantIds.map((tenantId) =>
-        this.prisma.userTenant.upsert({
+    await this.prisma.$transaction(async (tx) => {
+      await tx.userTenant.deleteMany({
+        where: { userId: id, ...(tenantIds.length ? { tenantId: { notIn: tenantIds } } : {}) },
+      });
+      for (const tenantId of tenantIds) {
+        await tx.userTenant.upsert({
           where: { userId_tenantId: { userId: id, tenantId } },
           create: { userId: id, tenantId },
           update: {},
-        }),
-      ),
-    ]);
+        });
+      }
+    });
     return this.get(id);
+  }
+  private async ensureAnotherActiveAdmin(tx: Prisma.TransactionClient, excludedIds: string[]) {
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(74239001)`;
+    const remaining = await tx.user.count({
+      where: { role: UserRole.admin, status: UserStatus.active, id: { notIn: excludedIds } },
+    });
+    if (remaining === 0) throw new BadRequestException('At least one active admin account must remain');
   }
 
   private async findAccount(id: string) {
