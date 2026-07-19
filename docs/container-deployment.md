@@ -11,13 +11,20 @@
 
 生产环境至少准备：`DATABASE_URL`、强随机 `JWT_SECRET`、`CORS_ORIGINS`、`PORT`。API 位于反向代理后时，应按实际且固定的代理层数设置 `TRUST_PROXY_HOPS`，否则保持 `0`。微信凭据保存在系统设置中，不写入镜像或部署日志。
 
-## 2. 镜像构建
+## 2. Docker Hub 镜像发布
 
-在 `backend/api` 目录执行：
+GitHub Actions 在 `main` 推送通过门禁后自动构建并推送镜像。仓库需要配置两个 Actions Secrets：`DOCKERHUB_USERNAME` 和 Docker Hub access token `DOCKERHUB_TOKEN`。镜像名称固定为 `${DOCKERHUB_USERNAME}/neye-api`，包含以下标签：
+
+- `latest`：`main` 最新成功构建；
+- `sha-<完整提交哈希>`：每次推送的不可变回滚版本；
+- `1.2.3`、`1.2`：推送 `v1.2.3` Git 标签时生成。
+
+本地手动构建示例：
 
 ```bash
-docker build -t registry.example.com/neye-api:$RELEASE_TAG .
-docker push registry.example.com/neye-api:$RELEASE_TAG
+IMAGE="$DOCKERHUB_USERNAME/neye-api"
+docker build -t "$IMAGE:$RELEASE_TAG" .
+docker push "$IMAGE:$RELEASE_TAG"
 ```
 
 镜像内置 readiness 健康检查。不要用 `latest` 作为唯一可回滚标识。
@@ -34,25 +41,22 @@ pnpm test
 pnpm build
 ```
 
-CI 使用隔离 PostgreSQL 和 `prisma db push` 创建临时测试结构；这不代表允许生产 API 启动时自动 `db push`。
+CI 使用隔离 PostgreSQL 和 `prisma db push` 创建临时测试结构；验证全部通过后才会构建并推送 Docker Hub 镜像。
 
 ## 4. 数据库发布策略
 
 ### 4.1 默认安全行为
 
-以下开关默认全部为 `false`：
+数据库结构操作收敛为单一变量 `DB_SETUP_MODE`：
 
-```text
-RUN_DB_MIGRATIONS
-RUN_DB_PUSH
-ALLOW_UNSAFE_DB_PUSH
-RUN_DB_PUSH_ACCEPT_DATA_LOSS
-RUN_DB_SEED
-RUN_USER_TENANT_BACKFILL
-RUN_CUSTOMER_PINYIN_BACKFILL
-```
+| 值 | 用途 | 行为 |
+| --- | --- | --- |
+| `none` | 日常启动（默认） | 不修改数据库 |
+| `init` | 首次部署空库 | `prisma db push` 后执行幂等 seed |
+| `update` | baseline 前的结构升级 | 执行不接受数据丢失的 `prisma db push` |
+| `migrate` | baseline 完成后的结构升级 | 执行 `prisma migrate deploy` |
 
-同时开启 `RUN_DB_MIGRATIONS` 和 `RUN_DB_PUSH` 会直接拒绝启动。仅设置 `RUN_DB_PUSH=true` 也会被拒绝，必须同时显式设置 `ALLOW_UNSAFE_DB_PUSH=true`。
+非法值会拒绝启动。任何非 `none` 模式都应作为一次性发布任务运行，成功后立即改回 `none`，避免 API 多副本重复执行。`RUN_DB_BACKFILLS` 默认 `false`，仅在发布说明要求时临时开启。
 
 ### 4.2 当前 baseline 限制
 
@@ -66,51 +70,75 @@ RUN_CUSTOMER_PINYIN_BACKFILL
 
 完成上述步骤前，`pnpm db:migrate:status` 仅用于诊断，不得据此直接对历史生产库执行 deploy。
 
-### 4.3 推荐 release job（baseline 完成后）
+### 4.3 首次部署空库
+
+复制 `.env.docker.example` 并填写必填项，文件中的 `DB_SETUP_MODE` 始终保持 `none`。首次部署只在一次性容器中覆盖为 `init`。该模式创建当前 schema 并初始化管理员；已有同名管理员时会幂等跳过，若同名账号不是管理员则拒绝自动提权。
+
+```bash
+docker run --rm --env-file .env.docker \
+  -e DB_SETUP_MODE=init \
+  "$DOCKERHUB_USERNAME/neye-api:$RELEASE_TAG" true
+```
+
+任务成功后直接以 `DB_SETUP_MODE=none` 启动 API。生产环境未设置 `SEED_ADMIN_PASSWORD`，或仍使用示例占位密码时，初始化会拒绝执行。
+
+### 4.4 baseline 完成前的结构升级
+
+只有在隔离副本验证、完成备份并人工审查 Prisma 输出后，才可运行：
+
+```bash
+docker run --rm --env-file .env.docker \
+  -e DB_SETUP_MODE=update \
+  "$DOCKERHUB_USERNAME/neye-api:$RELEASE_TAG" true
+```
+
+`update` 不传递 `--accept-data-loss`。如果 Prisma 报告需要接受数据丢失或无法执行，应立即停止，由 DBA 核对实际 schema diff、受影响数据和恢复点后制定迁移方案。禁止通过修改容器开关绕过保护。
+
+操作结束立即恢复 `DB_SETUP_MODE=none`。禁止把 `init`、`update` 或 `migrate` 长期写入 API Deployment。
+
+#### 4.4.1 P2022 / `import_tasks.phase` 缺列恢复
+
+新镜像中的 Prisma Client 和导入任务恢复逻辑会查询 `import_tasks.phase`。如果 API 镜像先于数据库 schema 发布，且 `DB_SETUP_MODE=none`，entrypoint 会跳过数据库变更，新代码随后会因旧库缺列而返回 Prisma P2022。这是发布顺序不一致，不应通过删除表、重建数据库或接受数据丢失来处理。
+
+恢复步骤：
+
+1. 停止全部 API 副本和导入 worker，避免旧、新 worker 并行处理任务。
+2. 使用 `pg_dump` 完成生产库备份，并确认备份文件可读、存储空间充足；有条件时先在隔离恢复库演练。
+3. 使用本节上方的 `DB_SETUP_MODE=update` 一次性任务同步旧库。
+4. 如果 Prisma 要求接受数据丢失或无法安全完成，立即停止并交由 DBA 审查，不得追加危险参数重试。
+5. 同步成功后验证 `phase` 列可查询，再只启动一个 API 实例并验证 readiness：
+
+```bash
+psql "${DATABASE_URL%%\?*}" -v ON_ERROR_STOP=1 \
+  -c 'SELECT "phase", COUNT(*) FROM "import_tasks" GROUP BY "phase" ORDER BY "phase";'
+curl --fail https://api.example.com/api/health/ready
+```
+
+结构查询和 readiness 均成功后，再检查管理端导入任务列表并用一份小文件验证导入；确认无误后恢复其他 API 副本。`DB_SETUP_MODE` 继续保持 `none`。
+
+### 4.5 推荐 release job（baseline 完成后）
 
 先备份并检查状态：
 
 ```bash
 pg_dump "$DATABASE_URL" --format=custom --file="neye-$RELEASE_TAG.dump"
 docker run --rm --env-file .env.docker --entrypoint pnpm \
-  registry.example.com/neye-api:$RELEASE_TAG db:migrate:status
-docker run --rm --env-file .env.docker --entrypoint pnpm \
-  registry.example.com/neye-api:$RELEASE_TAG db:migrate:deploy
+  "$DOCKERHUB_USERNAME/neye-api:$RELEASE_TAG" db:migrate:status
+docker run --rm --env-file .env.docker \
+  -e DB_SETUP_MODE=migrate \
+  "$DOCKERHUB_USERNAME/neye-api:$RELEASE_TAG" true
 ```
 
 迁移成功后再启动 API 容器。不要让每个副本同时执行迁移。
 
-### 4.4 baseline 完成前的旧库一次性同步
+### 4.6 数据回填
 
-只有在隔离副本验证、完成备份并人工审查 Prisma 输出后，才可运行：
-
-```bash
-docker run --rm --env-file .env.docker \
-  -e RUN_DB_PUSH=true \
-  -e ALLOW_UNSAFE_DB_PUSH=true \
-  registry.example.com/neye-api:$RELEASE_TAG true
-```
-
-如 Prisma 明确要求 `--accept-data-loss`，必须先核对实际 SQL、数据影响和恢复点，再临时增加：
-
-```text
-RUN_DB_PUSH_ACCEPT_DATA_LOSS=true
-```
-
-操作结束立即关闭所有开关。禁止把这些值长期写入 API Deployment。
-
-### 4.5 数据回填
-
-回填与 DDL 分开执行，每次只开一个开关并观察耗时、错误和数据库负载：
+回填与 DDL 分开执行，并观察耗时、错误和数据库负载：
 
 ```bash
 docker run --rm --env-file .env.docker \
-  -e RUN_USER_TENANT_BACKFILL=true \
-  registry.example.com/neye-api:$RELEASE_TAG true
-
-docker run --rm --env-file .env.docker \
-  -e RUN_CUSTOMER_PINYIN_BACKFILL=true \
-  registry.example.com/neye-api:$RELEASE_TAG true
+  -e RUN_DB_BACKFILLS=true \
+  "$DOCKERHUB_USERNAME/neye-api:$RELEASE_TAG" true
 ```
 
 ## 5. 启动与探针
@@ -120,7 +148,7 @@ docker run -d --name neye-api \
   --restart unless-stopped \
   --env-file .env.docker \
   -p 3100:3000 \
-  registry.example.com/neye-api:$RELEASE_TAG
+  "$DOCKERHUB_USERNAME/neye-api:$RELEASE_TAG"
 ```
 
 验证：
@@ -180,8 +208,8 @@ pg_restore --clean --if-exists --dbname="$RESTORE_DATABASE_URL" neye.dump
 | --- | --- |
 | Prisma P1001 | 数据库地址、端口、防火墙或服务状态 |
 | readiness 503 | 数据库连通性、连接池、凭据和数据库负载 |
-| entrypoint 拒绝 `db push` | 仅在批准的一次性任务中同时设置 `ALLOW_UNSAFE_DB_PUSH=true` |
-| entrypoint 拒绝启动 | 检查是否同时启用了 migration 与 db push |
+| entrypoint 拒绝数据库操作 | 检查 `DB_SETUP_MODE` 是否为 `none`、`init`、`update` 或 `migrate` |
+| `init` seed 拒绝执行 | 设置非默认、非占位的 `SEED_ADMIN_PASSWORD` |
 | 微信请求 504 | 后端到 `api.weixin.qq.com` 的网络、DNS 或超时设置 |
 | 微信请求 502 | 微信上游错误、响应格式或凭据配置 |
 | Web 扫码一直等待 | 检查小程序是否显示确认页、会话是否过期、手机是否明确确认 |

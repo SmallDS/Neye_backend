@@ -47,23 +47,40 @@ pnpm db:backfill-customer-pinyin
 ## Docker
 
 ```powershell
+Copy-Item .env.docker.example .env.docker
 docker build -t neye-api .
 docker run --env-file .env.docker -p 3100:3000 neye-api
 ```
 
-所有数据库变更默认关闭：
+数据库部署只需设置一个模式，默认 `none` 不修改数据库：
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `RUN_DB_MIGRATIONS` | `false` | 显式运行 `prisma migrate deploy` |
-| `RUN_DB_PUSH` | `false` | 显式运行旧库结构同步 |
-| `ALLOW_UNSAFE_DB_PUSH` | `false` | `RUN_DB_PUSH=true` 时必须同时确认 |
-| `RUN_DB_PUSH_ACCEPT_DATA_LOSS` | `false` | 仅在备份、评审 Prisma 警告后临时开启 |
-| `RUN_DB_SEED` | `false` | 显式执行种子数据 |
-| `RUN_CUSTOMER_PINYIN_BACKFILL` | `false` | 显式回填姓名拼音 |
-| `RUN_USER_TENANT_BACKFILL` | `false` | 显式回填账号租户关系 |
+| `DB_SETUP_MODE` | `none` | `init` 首次建库并 seed；`update` 同步结构；`migrate` 仅供已 baseline 的数据库 |
+| `RUN_DB_BACKFILLS` | `false` | 按发布说明一次性执行幂等数据回填 |
+
+`.env.docker` 始终保持 `DB_SETUP_MODE=none`。首次部署通过一次性容器覆盖为 `init`；以后 `schema.prisma` 发生结构变化时，先备份并在副本验证，再通过一次性容器覆盖为 `update`。Prisma 如果提示数据丢失会直接失败，不会自动接受。当前 migration 集合缺少初始建库基线，未完成 baseline 前不要使用 `migrate`。
+
+```powershell
+# 首次部署空库
+docker run --rm --env-file .env.docker -e DB_SETUP_MODE=init "$env:DOCKERHUB_USERNAME/neye-api:$env:RELEASE_TAG" true
+
+# 后续结构升级（先备份并在数据库副本验证）
+docker run --rm --env-file .env.docker -e DB_SETUP_MODE=update "$env:DOCKERHUB_USERNAME/neye-api:$env:RELEASE_TAG" true
+```
 
 生产发布、旧库 baseline、备份恢复和回滚流程见 [容器部署说明](docs/container-deployment.md)。
+
+### GitHub Actions 发布到 Docker Hub
+
+仓库推送到 `main` 后，CI 验证通过会自动构建并推送镜像；推送 `v1.2.3` 格式的标签还会生成对应语义化版本标签。先在 GitHub 仓库的 `Settings -> Secrets and variables -> Actions` 中配置：
+
+| Secret | 说明 |
+| --- | --- |
+| `DOCKERHUB_USERNAME` | Docker Hub 用户名，也是镜像命名空间 |
+| `DOCKERHUB_TOKEN` | Docker Hub access token，不要使用账号密码 |
+
+镜像地址为 `DOCKERHUB_USERNAME/neye-api`，每次发布包含完整提交 SHA 标签；`main` 同时更新 `latest`。
 
 ## 管理后台治理
 
