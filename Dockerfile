@@ -23,7 +23,8 @@ COPY src ./src
 RUN pnpm build
 
 COPY docker-entrypoint.sh /usr/local/bin/neye-api-entrypoint
-RUN chmod +x /usr/local/bin/neye-api-entrypoint
+COPY scripts/neye-db.sh /usr/local/bin/neye-db
+RUN chmod +x /usr/local/bin/neye-api-entrypoint /usr/local/bin/neye-db
 
 ENV NODE_ENV=production
 ENV PORT=3000

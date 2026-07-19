@@ -27,12 +27,6 @@ chmod +x "$bin_dir/pnpm" "$bin_dir/start-api"
 export PATH="$bin_dir:$PATH"
 export ENTRYPOINT_TEST_LOG="$log_file"
 
-run_case() {
-  : > "$log_file"
-  DB_SETUP_MODE="$1" RUN_DB_BACKFILLS="${2:-false}" \
-    sh "$project_dir/docker-entrypoint.sh" start-api ready >/dev/null
-}
-
 assert_log() {
   expected="$1"
   actual="$(cat "$log_file")"
@@ -42,27 +36,9 @@ assert_log() {
   fi
 }
 
-run_case none
+: > "$log_file"
+DB_SETUP_MODE=update RUN_DB_BACKFILLS=true \
+  sh "$project_dir/docker-entrypoint.sh" start-api ready >/dev/null
 assert_log 'start-api ready'
-
-run_case init
-assert_log 'pnpm prisma db push
-pnpm db:seed
-start-api ready'
-
-run_case update true
-assert_log 'pnpm prisma db push
-pnpm db:backfill-user-tenants
-pnpm db:backfill-customer-pinyin
-start-api ready'
-
-run_case migrate
-assert_log 'pnpm db:migrate:deploy
-start-api ready'
-
-if DB_SETUP_MODE=invalid sh "$project_dir/docker-entrypoint.sh" start-api ready >/dev/null 2>&1; then
-  echo 'invalid DB_SETUP_MODE should fail' >&2
-  exit 1
-fi
 
 echo 'docker entrypoint tests passed'

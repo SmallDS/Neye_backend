@@ -48,25 +48,28 @@ pnpm db:backfill-customer-pinyin
 
 ```powershell
 Copy-Item .env.docker.example .env.docker
-docker build -t neye-api .
-docker run --env-file .env.docker -p 3100:3000 neye-api
+$env:NEYE_IMAGE = 'smallds2004/neye-api:latest'
+docker pull $env:NEYE_IMAGE
+docker run --env-file .env.docker -p 3100:3000 $env:NEYE_IMAGE
 ```
 
-数据库部署只需设置一个模式，默认 `none` 不修改数据库：
+API 容器启动时不会执行任何数据库结构、seed 或回填操作。数据库维护必须通过独立的 `neye-db` 脚本显式执行：
 
-| 变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `DB_SETUP_MODE` | `none` | `init` 首次建库并 seed；`update` 同步结构；`migrate` 仅供已 baseline 的数据库 |
-| `RUN_DB_BACKFILLS` | `false` | 按发布说明一次性执行幂等数据回填 |
+| 命令 | 说明 |
+| --- | --- |
+| `init` | 首次空库建表并 seed |
+| `update` | 执行评审过的历史数据 SQL，再安全同步 schema |
+| `backfill` | 执行幂等业务数据回填 |
+| `status` | 查看 Prisma migration 状态 |
 
-`.env.docker` 始终保持 `DB_SETUP_MODE=none`。首次部署通过一次性容器覆盖为 `init`；以后 `schema.prisma` 发生结构变化时，先备份并在副本验证，再通过一次性容器覆盖为 `update`。Prisma 如果提示数据丢失会直接失败，不会自动接受。当前 migration 集合缺少初始建库基线，未完成 baseline 前不要使用 `migrate`。
+以后 `schema.prisma` 发生结构变化时，先备份并在副本验证，再运行 `update`。该命令不会接受 Prisma 数据丢失警告。当前 migration 集合缺少初始建库基线，因此 `neye-db` 暂不提供 `migrate` 子命令。
 
 ```powershell
 # 首次部署空库
-docker run --rm --env-file .env.docker -e DB_SETUP_MODE=init "$env:DOCKERHUB_USERNAME/neye-api:$env:RELEASE_TAG" true
+docker run --rm --env-file .env.docker --entrypoint neye-db smallds2004/neye-api:latest init
 
 # 后续结构升级（先备份并在数据库副本验证）
-docker run --rm --env-file .env.docker -e DB_SETUP_MODE=update "$env:DOCKERHUB_USERNAME/neye-api:$env:RELEASE_TAG" true
+docker run --rm --env-file .env.docker --entrypoint neye-db smallds2004/neye-api:latest update
 ```
 
 生产发布、旧库 baseline、备份恢复和回滚流程见 [容器部署说明](docs/container-deployment.md)。
@@ -80,7 +83,7 @@ docker run --rm --env-file .env.docker -e DB_SETUP_MODE=update "$env:DOCKERHUB_U
 | `DOCKERHUB_USERNAME` | Docker Hub 用户名，也是镜像命名空间 |
 | `DOCKERHUB_TOKEN` | Docker Hub access token，不要使用账号密码 |
 
-镜像地址为 `DOCKERHUB_USERNAME/neye-api`，每次发布包含完整提交 SHA 标签；`main` 同时更新 `latest`。
+镜像地址固定为 `smallds2004/neye-api`，`main` 更新 `latest`，每次发布还会生成完整提交 SHA 标签。生产回滚时建议把 `latest` 替换为对应的 `sha-...` 不可变标签。
 
 ## 管理后台治理
 

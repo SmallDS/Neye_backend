@@ -46,9 +46,18 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: sh -n docker-entrypoint.sh
+      - run: sh -n scripts/neye-db.sh
       - run: sh test/docker-entrypoint.test.sh
+      - run: sh test/neye-db.test.sh
       - run: pnpm prisma validate
       - run: pnpm prisma:generate
+      - name: Verify legacy database update SQL
+        run: |
+          pnpm prisma db execute --file prisma/manual-updates/20260719_import_task_row_idempotency.sql --schema prisma/schema.prisma
+          pnpm prisma db execute --file test/sql/setup-legacy-import-task-rows.sql --schema prisma/schema.prisma
+          pnpm prisma db execute --file prisma/manual-updates/20260719_import_task_row_idempotency.sql --schema prisma/schema.prisma
+          pnpm prisma db execute --file prisma/manual-updates/20260719_import_task_row_idempotency.sql --schema prisma/schema.prisma
+          pnpm prisma db execute --file test/sql/assert-import-task-row-idempotency.sql --schema prisma/schema.prisma
       - name: Prepare ephemeral test database
         run: pnpm prisma db push --skip-generate
       - run: pnpm typecheck
