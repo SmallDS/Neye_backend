@@ -1,9 +1,10 @@
 import { Body, Controller, Delete, Get, Param, Post, Query, Res, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
-import { UserRole } from '@prisma/client';
+import { EventLogLevel, UserRole } from '@prisma/client';
 import { CurrentUserContext } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
+import { LogEvent } from '../event-logs/event-log.decorator';
 import { AuthGuard } from '../common/guards/auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { CurrentUser } from '../common/types/current-user';
@@ -40,6 +41,7 @@ export class ImportTasksController {
   }
 
   @Post('customer-optometry')
+  @LogEvent({ module: 'import_tasks', action: 'CREATED', resourceType: 'import_task' })
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_IMPORT_FILE_BYTES, files: 1 } }))
   createCustomerOptometryTask(
     @CurrentUserContext() user: CurrentUser,
@@ -63,16 +65,19 @@ export class ImportTasksController {
   }
 
   @Post(':id/cancel')
+  @LogEvent({ module: 'import_tasks', action: 'CANCEL_REQUESTED', resourceType: 'import_task', resourceParam: 'id', level: EventLogLevel.WARN })
   cancel(@Param('id') id: string) {
     return this.importTasksService.cancel(id);
   }
 
   @Post(':id/rollback')
+  @LogEvent({ module: 'import_tasks', action: 'ROLLED_BACK', resourceType: 'import_task', resourceParam: 'id', level: EventLogLevel.WARN })
   rollback(@Param('id') id: string) {
     return this.importTasksService.rollback(id);
   }
 
   @Delete(':id')
+  @LogEvent({ module: 'import_tasks', action: 'DELETED', resourceType: 'import_task', resourceParam: 'id', level: EventLogLevel.WARN })
   remove(@Param('id') id: string) {
     return this.importTasksService.remove(id);
   }

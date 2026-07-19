@@ -1,12 +1,13 @@
 import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { createHash, randomUUID } from 'crypto';
-import { Gender, ImportTaskPhase, ImportTaskRowStatus, ImportTaskStatus, ImportTaskType, Prisma } from '@prisma/client';
+import { EventLogCategory, EventLogLevel, EventLogResult, Gender, ImportTaskPhase, ImportTaskRowStatus, ImportTaskStatus, ImportTaskType, Prisma } from '@prisma/client';
 import * as XLSX from 'xlsx';
 import { toPageResult } from '../common/dto/page.dto';
 import { createOrderNo } from '../common/order-number';
 import { buildCustomerNameSearchFields } from '../customers/customer-name-search';
 import { CurrentUser } from '../common/types/current-user';
 import { PrismaService } from '../prisma/prisma.service';
+import { EventLogsService } from '../event-logs/event-logs.service';
 import { CreateImportTaskDto } from './dto/create-import-task.dto';
 import { ImportTaskQueryDto } from './dto/import-task-query.dto';
 import { ImportBatchCanceledError, ImportLeaseLostError, assertImportTaskCanContinue } from './import-batch-atomic';
@@ -112,7 +113,10 @@ export class ImportTasksService implements OnModuleInit, OnModuleDestroy {
   private workerRunning = false;
   private recoveryTimer?: NodeJS.Timeout;
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly eventLogs: EventLogsService,
+  ) {}
 
   async onModuleInit() {
     await this.recoverTasks();
@@ -516,6 +520,7 @@ export class ImportTasksService implements OnModuleInit, OnModuleDestroy {
       }
       if (error instanceof ImportLeaseLostError) {
         this.logger.warn(`Import task ${taskId} stopped after lease loss`);
+        await this.recordImportEvent(taskId, 'LEASE_LOST', EventLogLevel.WARN, EventLogResult.FAILED, 'Import worker lease was lost');
         return;
       }
       await this.markTaskFailed(taskId, error);
@@ -715,6 +720,7 @@ export class ImportTasksService implements OnModuleInit, OnModuleDestroy {
         },
       });
     }, { maxWait: 10_000, timeout: 30_000 });
+    await this.recordImportEvent(taskId, 'COMPLETED', EventLogLevel.INFO, EventLogResult.SUCCESS);
   }
 
   private async markTaskFailed(taskId: string, error: unknown) {
@@ -740,6 +746,7 @@ export class ImportTasksService implements OnModuleInit, OnModuleDestroy {
 
   private async finishFailed(taskId: string, message: string, rowFailure?: ImportRowFailureError) {
     await this.cleanupHiddenImport(taskId, ImportTaskStatus.failed, message, rowFailure);
+    await this.recordImportEvent(taskId, 'FAILED', EventLogLevel.ERROR, EventLogResult.FAILED, 'Import processing failed');
   }
 
   private async assertActiveLease(tx: Prisma.TransactionClient, taskId: string) {
@@ -756,6 +763,7 @@ export class ImportTasksService implements OnModuleInit, OnModuleDestroy {
       data: { phase: ImportTaskPhase.cleanup },
     });
     await this.cleanupHiddenImport(taskId, ImportTaskStatus.canceled, 'Import task canceled');
+    await this.recordImportEvent(taskId, 'CANCELED', EventLogLevel.WARN, EventLogResult.SUCCESS);
   }
 
   private async cleanupHiddenImport(
@@ -805,6 +813,35 @@ export class ImportTasksService implements OnModuleInit, OnModuleDestroy {
         },
       });
     }, { maxWait: 10_000, timeout: 30_000 });
+  }
+  private async recordImportEvent(
+    taskId: string,
+    action: string,
+    level: EventLogLevel,
+    result: EventLogResult,
+    errorSummary?: string,
+  ) {
+    try {
+      const task = await this.prisma.importTask.findUnique({
+        where: { id: taskId },
+        select: { tenantId: true, createdById: true, createdBy: { select: { username: true } } },
+      });
+      await this.eventLogs.recordSafe({
+        level,
+        category: EventLogCategory.SYSTEM,
+        result,
+        module: 'import_tasks',
+        action,
+        actorUserId: task?.createdById,
+        actorUsername: task?.createdBy.username,
+        tenantId: task?.tenantId,
+        resourceType: 'import_task',
+        resourceId: taskId,
+        errorSummary,
+      });
+    } catch {
+      this.logger.error(`Import event log persistence failed for task ${taskId}`);
+    }
   }
   private async processRow(
     tx: Prisma.TransactionClient,

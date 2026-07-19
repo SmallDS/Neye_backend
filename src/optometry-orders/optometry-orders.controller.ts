@@ -1,5 +1,7 @@
 import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
+import { EventLogLevel } from '@prisma/client';
+import { LogEvent } from '../event-logs/event-log.decorator';
 import { CurrentUserContext } from '../common/decorators/current-user.decorator';
 import { BatchDeleteDto } from '../common/dto/batch-delete.dto';
 import { AuthGuard } from '../common/guards/auth.guard';
@@ -23,6 +25,7 @@ export class OptometryOrdersController {
   }
 
   @Post('customers/:customerId/optometry-orders')
+  @LogEvent({ module: 'optometry_orders', action: 'CREATED', resourceType: 'optometry_order' })
   createForCustomer(
     @CurrentUserContext() user: CurrentUser,
     @Param('customerId') customerId: string,
@@ -32,6 +35,7 @@ export class OptometryOrdersController {
   }
 
   @Post('optometry-orders/batch-delete')
+  @LogEvent({ module: 'optometry_orders', action: 'BATCH_DELETED', resourceType: 'optometry_order', level: EventLogLevel.WARN })
   removeMany(@CurrentUserContext() user: CurrentUser, @Body() dto: BatchDeleteDto) {
     return this.optometryOrdersService.removeMany(user, dto);
   }
@@ -42,11 +46,13 @@ export class OptometryOrdersController {
   }
 
   @Patch('optometry-orders/:id')
+  @LogEvent({ module: 'optometry_orders', action: 'UPDATED', resourceType: 'optometry_order', resourceParam: 'id' })
   update(@CurrentUserContext() user: CurrentUser, @Param('id') id: string, @Body() dto: UpdateOptometryOrderDto) {
     return this.optometryOrdersService.update(user, id, dto);
   }
 
   @Delete('optometry-orders/:id')
+  @LogEvent({ module: 'optometry_orders', action: 'DELETED', resourceType: 'optometry_order', resourceParam: 'id', level: EventLogLevel.WARN })
   remove(@CurrentUserContext() user: CurrentUser, @Param('id') id: string) {
     return this.optometryOrdersService.remove(user, id);
   }

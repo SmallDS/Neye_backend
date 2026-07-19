@@ -1,5 +1,7 @@
 import { Body, Controller, Delete, Get, Ip, Param, Patch, Post, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
+import { EventLogCategory, EventLogLevel } from '@prisma/client';
+import { LogEvent } from '../event-logs/event-log.decorator';
 import { CurrentUserContext } from '../common/decorators/current-user.decorator';
 import { AuthGuard } from '../common/guards/auth.guard';
 import { InMemoryRateLimiter } from '../common/security/in-memory-rate-limiter';
@@ -26,6 +28,7 @@ export class AuthController {
   ) {}
 
   @Post('login')
+  @LogEvent({ module: 'auth', action: 'LOGIN', resourceType: 'user', category: EventLogCategory.SECURITY })
   login(@Body() dto: LoginDto, @Ip() ip: string) {
     this.rateLimiter.consume('password-login-ip', ip, 10, FIVE_MINUTES_MS);
     this.rateLimiter.consume('password-login-account', dto.username, 6, FIVE_MINUTES_MS);
@@ -60,12 +63,14 @@ export class AuthController {
   }
 
   @Post('wechat/miniapp-login')
+  @LogEvent({ module: 'auth', action: 'WECHAT_LOGIN', resourceType: 'user', category: EventLogCategory.SECURITY })
   loginFromWechatMiniapp(@Body() dto: WechatMiniLoginDto, @Ip() ip: string) {
     this.rateLimiter.consume('wechat-mini-login', ip, 20, FIVE_MINUTES_MS);
     return this.wechatAuthService.loginFromMiniapp(dto);
   }
 
   @Post('wechat/bind-account')
+  @LogEvent({ module: 'auth', action: 'WECHAT_BOUND', resourceType: 'user', category: EventLogCategory.SECURITY, level: EventLogLevel.WARN })
   bindWechatAccount(@Body() dto: WechatBindAccountDto, @Ip() ip: string) {
     this.rateLimiter.consume('wechat-bind-account-ip', ip, 10, FIVE_MINUTES_MS);
     this.rateLimiter.consume('wechat-bind-account-user', dto.username, 6, FIVE_MINUTES_MS);
@@ -81,6 +86,7 @@ export class AuthController {
   }
 
   @Post('wechat/binding')
+  @LogEvent({ module: 'auth', action: 'WECHAT_BOUND', resourceType: 'user', category: EventLogCategory.SECURITY, level: EventLogLevel.WARN })
   @ApiBearerAuth()
   @UseGuards(AuthGuard)
   bindCurrentWechat(
@@ -92,6 +98,7 @@ export class AuthController {
   }
 
   @Delete('wechat/binding')
+  @LogEvent({ module: 'auth', action: 'WECHAT_UNBOUND', resourceType: 'user', category: EventLogCategory.SECURITY, level: EventLogLevel.WARN })
   @ApiBearerAuth()
   @UseGuards(AuthGuard)
   unbindCurrentWechat(@CurrentUserContext() user: CurrentUser) {
@@ -106,6 +113,7 @@ export class AuthController {
   }
 
   @Patch('me')
+  @LogEvent({ module: 'auth', action: 'PROFILE_UPDATED', resourceType: 'user' })
   @ApiBearerAuth()
   @UseGuards(AuthGuard)
   updateProfile(@CurrentUserContext() user: CurrentUser, @Body() dto: UpdateProfileDto) {
@@ -113,6 +121,7 @@ export class AuthController {
   }
 
   @Patch('password')
+  @LogEvent({ module: 'auth', action: 'PASSWORD_CHANGED', resourceType: 'user', category: EventLogCategory.SECURITY, level: EventLogLevel.WARN })
   @ApiBearerAuth()
   @UseGuards(AuthGuard)
   changePassword(@CurrentUserContext() user: CurrentUser, @Body() dto: ChangePasswordDto) {

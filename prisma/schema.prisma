@@ -7,6 +7,23 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum EventLogLevel {
+  INFO
+  WARN
+  ERROR
+}
+
+enum EventLogCategory {
+  AUDIT
+  SECURITY
+  SYSTEM
+}
+
+enum EventLogResult {
+  SUCCESS
+  DENIED
+  FAILED
+}
 enum TenantStatus {
   active
   disabled
@@ -430,4 +447,31 @@ model SystemSetting {
   updatedAt DateTime @updatedAt @map("updated_at")
 
   @@map("system_settings")
+}
+model EventLog {
+  id            String           @id @default(uuid()) @db.Uuid
+  level         EventLogLevel
+  category      EventLogCategory
+  result        EventLogResult
+  module        String           @db.VarChar(80)
+  action        String           @db.VarChar(80)
+  actorUserId   String?          @map("actor_user_id") @db.Uuid
+  actorUsername String?          @map("actor_username") @db.VarChar(80)
+  tenantId      String?          @map("tenant_id") @db.Uuid
+  resourceType  String?          @map("resource_type") @db.VarChar(80)
+  resourceId    String?          @map("resource_id") @db.VarChar(160)
+  requestId     String?          @map("request_id") @db.VarChar(128)
+  ipAddress     String?          @map("ip_address") @db.VarChar(64)
+  reason        String?          @db.Text
+  errorSummary  String?          @map("error_summary") @db.Text
+  metadata      Json?
+  createdAt     DateTime         @default(now()) @map("created_at")
+
+  @@index([createdAt])
+  @@index([level, createdAt])
+  @@index([tenantId, createdAt])
+  @@index([actorUserId, createdAt])
+  @@index([resourceType, resourceId, createdAt])
+  @@index([requestId])
+  @@map("event_logs")
 }

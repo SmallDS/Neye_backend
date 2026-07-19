@@ -1,7 +1,8 @@
 import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
-import { UserRole } from '@prisma/client';
+import { EventLogLevel, UserRole } from '@prisma/client';
 import { Roles } from '../common/decorators/roles.decorator';
+import { LogEvent } from '../event-logs/event-log.decorator';
 import { BatchDeleteDto } from '../common/dto/batch-delete.dto';
 import { AuthGuard } from '../common/guards/auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
@@ -25,24 +26,28 @@ export class ProductItemsController {
 
   @Post()
   @Roles(UserRole.admin)
+  @LogEvent({ module: 'product_items', action: 'CREATED', resourceType: 'product_item' })
   create(@Body() dto: CreateProductItemDto) {
     return this.productItemsService.create(dto);
   }
 
   @Post('batch-delete')
   @Roles(UserRole.admin)
+  @LogEvent({ module: 'product_items', action: 'BATCH_DELETED', resourceType: 'product_item', level: EventLogLevel.WARN })
   removeMany(@Body() dto: BatchDeleteDto) {
     return this.productItemsService.removeMany(dto);
   }
 
   @Patch(':id')
   @Roles(UserRole.admin)
+  @LogEvent({ module: 'product_items', action: 'UPDATED', resourceType: 'product_item', resourceParam: 'id' })
   update(@Param('id') id: string, @Body() dto: UpdateProductItemDto) {
     return this.productItemsService.update(id, dto);
   }
 
   @Delete(':id')
   @Roles(UserRole.admin)
+  @LogEvent({ module: 'product_items', action: 'DELETED', resourceType: 'product_item', resourceParam: 'id', level: EventLogLevel.WARN })
   remove(@Param('id') id: string) {
     return this.productItemsService.remove(id);
   }
