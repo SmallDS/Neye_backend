@@ -30,7 +30,7 @@ export ENTRYPOINT_TEST_LOG="$log_file"
 run_case() {
   : > "$log_file"
   DB_SETUP_MODE="$1" RUN_DB_BACKFILLS="${2:-false}" \
-    "$project_dir/docker-entrypoint.sh" start-api ready >/dev/null
+    sh "$project_dir/docker-entrypoint.sh" start-api ready >/dev/null
 }
 
 assert_log() {
@@ -60,7 +60,7 @@ run_case migrate
 assert_log 'pnpm db:migrate:deploy
 start-api ready'
 
-if DB_SETUP_MODE=invalid "$project_dir/docker-entrypoint.sh" start-api ready >/dev/null 2>&1; then
+if DB_SETUP_MODE=invalid sh "$project_dir/docker-entrypoint.sh" start-api ready >/dev/null 2>&1; then
   echo 'invalid DB_SETUP_MODE should fail' >&2
   exit 1
 fi
