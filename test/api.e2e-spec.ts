@@ -7,6 +7,7 @@ import * as XLSX from 'xlsx';
 import { randomUUID } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import { AppModule } from '../src/app.module';
+import { InMemoryRateLimiter } from '../src/common/security/in-memory-rate-limiter';
 
 interface LoginResponse {
   accessToken: string;
@@ -282,7 +283,10 @@ describe('NEye MVP API e2e', () => {
       },
     });
 
-    const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
+    const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+      .overrideProvider(InMemoryRateLimiter)
+      .useValue({ consume: () => undefined })
+      .compile();
     app = moduleRef.createNestApplication();
     app.setGlobalPrefix('api');
     app.useGlobalPipes(
