@@ -47,6 +47,28 @@ describe('event log governance policy', () => {
       ordinary: 'version 1.2.3; domain api.example.com; dotted abc.def.ghi',
     });
   });
+  it('filters WeChat recipient and scene data from keys and free text', async () => {
+    const create = jest.fn(async ({ data }: { data: Record<string, unknown> }) => data);
+    const service = new EventLogsService({ eventLog: { create } } as unknown as PrismaService);
+    await service.recordSafe({
+      level: EventLogLevel.ERROR,
+      category: EventLogCategory.SYSTEM,
+      result: EventLogResult.FAILED,
+      module: 'pickup_notifications',
+      action: 'SENSITIVE_DATA_TEST',
+      reason: 'openId=recipient scene=private-scene touser=recipient access_token=private-token',
+      metadata: {
+        openId: 'recipient',
+        scene: 'private-scene',
+        touser: 'recipient',
+        access_token: 'private-token',
+        safeTaskId: 'task-1',
+      },
+    });
+    const data = create.mock.calls[0]?.[0].data;
+    expect(data?.metadata).toEqual({ safeTaskId: 'task-1' });
+    expect(data?.reason).toBe('openId=[REDACTED] scene=[REDACTED] touser=[REDACTED] access_token=[REDACTED]');
+  });
   it('deletes first and inserts the governance summary in the same transaction', async () => {
     const operations: string[] = [];
     const tx = {

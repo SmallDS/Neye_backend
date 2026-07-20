@@ -254,7 +254,7 @@ export class EventLogsService implements OnModuleInit, OnModuleDestroy {
     if (value !== null && typeof value === 'object') {
       return Object.fromEntries(
         Object.entries(value)
-          .filter(([key]) => !/(password|secret|token|authorization|cookie|openid|session|raw)/i.test(key))
+          .filter(([key]) => !/(password|secret|token|authorization|cookie|openid|scene|touser|session|raw)/i.test(key))
           .map(([key, item]) => [key, this.sanitizeMetadata(item as Prisma.InputJsonValue)]),
       );
     }
@@ -265,7 +265,7 @@ export class EventLogsService implements OnModuleInit, OnModuleDestroy {
       .slice(0, 1000)
       .replace(/Bearer\s+[A-Za-z0-9._~-]+/gi, 'Bearer [REDACTED]')
       .replace(/(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{7,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])/g, '[REDACTED]')
-      .replace(/(password|appSecret|openId|session|cookie|authorization)\s*[:=]\s*\S+/gi, '$1=[REDACTED]')
+      .replace(/(password|appSecret|openId|scene|touser|access_token|session|cookie|authorization)\s*[:=]\s*\S+/gi, '$1=[REDACTED]')
       .replace(/\b(\d{3})\d{4}(\d{4})\b/g, '$1****$2');
   }
 

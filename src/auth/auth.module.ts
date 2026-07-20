@@ -1,6 +1,7 @@
 import { Global, Module } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 import { InMemoryRateLimiter } from '../common/security/in-memory-rate-limiter';
+import { WechatModule } from '../wechat/wechat.module';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { WechatAuthService } from './wechat-auth.service';
@@ -13,6 +14,7 @@ if (process.env.NODE_ENV === 'production' && (!jwtSecret || /dev-only|change-me/
 @Global()
 @Module({
   imports: [
+    WechatModule,
     JwtModule.register({
       secret: jwtSecret ?? 'dev-only-change-me',
       signOptions: { expiresIn: (process.env.JWT_EXPIRES_IN ?? '12h') as never },

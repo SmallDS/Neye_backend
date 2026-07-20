@@ -93,6 +93,21 @@ enum ImportTaskRowStatus {
   skipped
 }
 
+enum PickupNotificationTaskStatus {
+  pending
+  processing
+  retrying
+  sent
+  failed
+}
+
+enum PickupNotificationAttemptResult {
+  processing
+  sent
+  temporary_failure
+  permanent_failure
+}
+
 model Tenant {
   id           String       @id @default(uuid()) @db.Uuid
   code         String       @unique @db.VarChar(32)
@@ -109,6 +124,7 @@ model Tenant {
   optometryOrders   OptometryOrder[]
   fittingOrders     FittingOrder[]
   importTasks       ImportTask[]
+  pickupNotificationTasks PickupNotificationTask[]
 
   @@map("tenants")
 }
@@ -300,6 +316,7 @@ model FittingOrder {
   createdAt   DateTime  @default(now()) @map("created_at")
   updatedAt   DateTime  @updatedAt @map("updated_at")
   deletedAt   DateTime? @map("deleted_at")
+  readyForPickupAt DateTime? @map("ready_for_pickup_at")
 
   tenant           Tenant         @relation(fields: [tenantId], references: [id])
   customer         Customer       @relation(fields: [customerId, tenantId], references: [id, tenantId])
@@ -307,6 +324,9 @@ model FittingOrder {
   frameProductItem ProductItem?   @relation("FrameProductItem", fields: [frameProductItemId], references: [id])
   lensProductItem  ProductItem?   @relation("LensProductItem", fields: [lensProductItemId], references: [id])
   otherProductItem ProductItem?   @relation("OtherProductItem", fields: [otherProductItemId], references: [id])
+  pickupScene FittingPickupScene?
+  pickupSubscription FittingPickupSubscription?
+  pickupNotificationTask PickupNotificationTask?
 
   @@unique([tenantId, orderNo])
   @@unique([id, tenantId])
@@ -315,9 +335,95 @@ model FittingOrder {
   @@index([tenantId, frameProductItemId])
   @@index([tenantId, lensProductItemId])
   @@index([tenantId, otherProductItemId])
+  @@index([tenantId, readyForPickupAt])
   @@map("fitting_orders")
 }
 
+
+model FittingPickupScene {
+  id             String   @id @default(uuid()) @db.Uuid
+  fittingOrderId String   @unique @map("fitting_order_id") @db.Uuid
+  scene          String   @unique @db.VarChar(32)
+  expiresAt      DateTime @map("expires_at")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  fittingOrder FittingOrder @relation(fields: [fittingOrderId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@map("fitting_pickup_scenes")
+}
+
+model FittingPickupSubscription {
+  id             String    @id @default(uuid()) @db.Uuid
+  fittingOrderId String    @unique @map("fitting_order_id") @db.Uuid
+  appId          String    @map("app_id") @db.VarChar(64)
+  openId         String    @map("open_id") @db.VarChar(128)
+  templateId     String    @map("template_id") @db.VarChar(128)
+  keywordMapping Json      @map("keyword_mapping")
+  pickupTip      String    @map("pickup_tip") @db.VarChar(200)
+  subscribedAt   DateTime  @map("subscribed_at")
+  lockedAt       DateTime? @map("locked_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  fittingOrder FittingOrder @relation(fields: [fittingOrderId], references: [id], onDelete: Cascade)
+  task         PickupNotificationTask?
+
+  @@index([lockedAt])
+  @@map("fitting_pickup_subscriptions")
+}
+
+model PickupNotificationTask {
+  id               String                       @id @default(uuid()) @db.Uuid
+  fittingOrderId   String                       @unique @map("fitting_order_id") @db.Uuid
+  subscriptionId   String                       @unique @map("subscription_id") @db.Uuid
+  tenantId         String                       @map("tenant_id") @db.Uuid
+  status           PickupNotificationTaskStatus @default(pending)
+  cycle            Int                          @default(1)
+  attemptInCycle   Int                          @default(0) @map("attempt_in_cycle")
+  totalAttempts    Int                          @default(0) @map("total_attempts")
+  nextAttemptAt    DateTime                     @default(now()) @map("next_attempt_at")
+  leaseOwner       String?                      @map("lease_owner") @db.VarChar(128)
+  leaseExpiresAt   DateTime?                    @map("lease_expires_at")
+  lastErrorCode    String?                      @map("last_error_code") @db.VarChar(64)
+  lastErrorSummary String?                      @map("last_error_summary") @db.VarChar(500)
+  wechatMessageId  String?                      @map("wechat_message_id") @db.VarChar(128)
+  sentAt           DateTime?                    @map("sent_at")
+  createdAt        DateTime                     @default(now()) @map("created_at")
+  updatedAt        DateTime                     @updatedAt @map("updated_at")
+
+  fittingOrder FittingOrder              @relation(fields: [fittingOrderId], references: [id], onDelete: Cascade)
+  subscription FittingPickupSubscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  tenant       Tenant                    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  attempts     PickupNotificationAttempt[]
+
+  @@index([status, nextAttemptAt])
+  @@index([status, leaseExpiresAt])
+  @@index([tenantId, status, createdAt])
+  @@map("pickup_notification_tasks")
+}
+
+model PickupNotificationAttempt {
+  id              String                          @id @default(uuid()) @db.Uuid
+  taskId          String                          @map("task_id") @db.Uuid
+  cycle           Int
+  attemptNo       Int                             @map("attempt_no")
+  result          PickupNotificationAttemptResult @default(processing)
+  startedAt       DateTime                        @default(now()) @map("started_at")
+  finishedAt      DateTime?                       @map("finished_at")
+  wechatErrorCode Int?                            @map("wechat_error_code")
+  errorCode       String?                         @map("error_code") @db.VarChar(64)
+  errorSummary    String?                         @map("error_summary") @db.VarChar(500)
+  tokenRefreshed  Boolean                         @default(false) @map("token_refreshed")
+  nextRetryAt     DateTime?                       @map("next_retry_at")
+
+  task PickupNotificationTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@unique([taskId, cycle, attemptNo])
+  @@index([taskId, startedAt])
+  @@map("pickup_notification_attempts")
+}
 model ImportTask {
   id                      String           @id @default(uuid()) @db.Uuid
   tenantId                String           @map("tenant_id") @db.Uuid

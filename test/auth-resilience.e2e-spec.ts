@@ -6,6 +6,7 @@ import { WechatAuthService } from '../src/auth/wechat-auth.service';
 import { InMemoryRateLimiter } from '../src/common/security/in-memory-rate-limiter';
 import { HealthController } from '../src/health/health.controller';
 import { PrismaService } from '../src/prisma/prisma.service';
+import { WechatApiClient } from '../src/wechat/wechat-api.client';
 
 describe('Authentication resilience', () => {
   it('rejects requests after the in-memory limit is exhausted', () => {
@@ -37,7 +38,7 @@ describe('Authentication resilience', () => {
         openId: 'open-1',
       }),
     } as unknown as JwtService;
-    const service = new WechatAuthService(prisma, jwt, {} as AuthService);
+    const service = new WechatAuthService(prisma, jwt, {} as AuthService, {} as WechatApiClient);
     const dto = { confirmationToken: 'signed-token', decision: 'confirm' as const };
 
     await expect(service.decideLoginSession('session-1', dto)).resolves.toEqual({
@@ -73,7 +74,7 @@ describe('Authentication resilience', () => {
         openId: 'open-2',
       }),
     } as unknown as JwtService;
-    const service = new WechatAuthService(prisma, jwt, {} as AuthService);
+    const service = new WechatAuthService(prisma, jwt, {} as AuthService, {} as WechatApiClient);
 
     await expect(
       service.decideLoginSession('session-2', {

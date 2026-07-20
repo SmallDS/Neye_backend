@@ -3,7 +3,6 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
-  GatewayTimeoutException,
   Injectable,
   NotFoundException,
   ServiceUnavailableException,
@@ -18,9 +17,11 @@ import {
   WechatLoginSessionStatus,
 } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
-import { createHash, randomBytes } from 'crypto';
+import { randomBytes } from 'crypto';
 import { CurrentUser } from '../common/types/current-user';
 import { PrismaService } from '../prisma/prisma.service';
+import { WechatApiClient } from '../wechat/wechat-api.client';
+import { WechatApiError } from '../wechat/wechat-api.error';
 import { AuthService } from './auth.service';
 import { WechatBindAccountDto } from './dto/wechat-bind-account.dto';
 import { WechatMiniLoginDto } from './dto/wechat-mini-login.dto';
@@ -30,7 +31,6 @@ const WECHAT_AUTH_KEY = 'wechat_auth';
 const SESSION_TTL_MS = 2 * 60 * 1000;
 const BINDING_TOKEN_TTL = '10m';
 const CONFIRMATION_TOKEN_TTL = '3m';
-const DEFAULT_WECHAT_TIMEOUT_MS = 8_000;
 
 interface BindingTokenPayload {
   purpose: 'wechat-bind';
@@ -47,28 +47,13 @@ interface ConfirmationTokenPayload {
   openId: string;
 }
 
-interface WechatCodeSession {
-  openid?: string;
-  errcode?: number;
-  errmsg?: string;
-}
-
-interface WechatAccessToken {
-  access_token?: string;
-  expires_in?: number;
-  errcode?: number;
-  errmsg?: string;
-}
-
 @Injectable()
 export class WechatAuthService {
-  private readonly accessTokenCache = new Map<string, { token: string; expiresAt: number }>();
-  private readonly accessTokenRequests = new Map<string, Promise<string>>();
-
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwtService: JwtService,
     private readonly authService: AuthService,
+    private readonly wechatApi: WechatApiClient,
   ) {}
 
   async getPublicConfig() {
@@ -301,12 +286,7 @@ export class WechatAuthService {
       },
     });
     try {
-      const qrCodeDataUrl = await this.createMiniappQrCode(
-        config.appId,
-        config.secret,
-        config.envVersion,
-        scene,
-      );
+      const qrCodeDataUrl = await this.createMiniappQrCode(config.envVersion, scene);
       return {
         id: session.id,
         status: session.status,
@@ -320,144 +300,38 @@ export class WechatAuthService {
   }
 
   private async exchangeCode(code: string) {
-    const config = await this.requireEnabledConfig();
-    const url = new URL('https://api.weixin.qq.com/sns/jscode2session');
-    url.searchParams.set('appid', config.appId);
-    url.searchParams.set('secret', config.secret);
-    url.searchParams.set('js_code', code);
-    url.searchParams.set('grant_type', 'authorization_code');
-    const response = await this.fetchWechat(url, {}, 'Wechat code exchange');
-    const body = await this.readWechatJson<WechatCodeSession>(response, 'Wechat code exchange');
-    if (!response.ok || body.errcode || !body.openid) {
-      if (body.errcode === 40029 || body.errcode === 40163) {
-        throw new UnauthorizedException('Wechat login code is invalid or already used');
+    await this.requireEnabledConfig();
+    try {
+      return await this.wechatApi.exchangeMiniappCode(code);
+    } catch (error) {
+      if (error instanceof WechatApiError) {
+        if (error.kind === 'invalid_code') throw new UnauthorizedException(error.safeMessage);
+        if (error.kind === 'configuration') throw new ServiceUnavailableException(error.safeMessage);
+        throw new BadGatewayException(error.safeMessage);
       }
-      throw new BadGatewayException(this.wechatApiError('Wechat code exchange', response, body.errcode));
+      throw error;
     }
-    return { appId: config.appId, openId: body.openid };
   }
 
   private async createMiniappQrCode(
-    appId: string,
-    secret: string,
     envVersion: 'develop' | 'release' | 'trial',
     scene: string,
   ) {
-    const accessToken = await this.getAccessToken(appId, secret);
-    const response = await this.fetchWechat(
-      `https://api.weixin.qq.com/wxa/getwxacodeunlimit?access_token=${encodeURIComponent(accessToken)}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          scene,
-          page: 'pages/login/index',
-          check_path: false,
-          env_version: envVersion,
-          width: 280,
-        }),
-      },
-      'Wechat QR code generation',
-    );
-    const contentType = response.headers.get('content-type') ?? '';
-    if (!response.ok || contentType.includes('application/json')) {
-      let errorCode: number | undefined;
-      try {
-        const body = (await response.json()) as { errcode?: number };
-        errorCode = body.errcode;
-      } catch {
-        // The upstream may return a non-JSON error body. Do not expose it to clients.
-      }
-      throw new BadGatewayException(this.wechatApiError('Wechat QR code generation', response, errorCode));
-    }
-    const bytes = Buffer.from(await response.arrayBuffer());
-    return `data:image/png;base64,${bytes.toString('base64')}`;
-  }
-
-  private async getAccessToken(appId: string, secret: string) {
-    const cacheKey = this.accessTokenCacheKey(appId, secret);
-    const cached = this.accessTokenCache.get(cacheKey);
-    if (cached && cached.expiresAt > Date.now() + 60_000) return cached.token;
-
-    const existingRequest = this.accessTokenRequests.get(cacheKey);
-    if (existingRequest) return existingRequest;
-
-    const request = this.loadAccessToken(appId, secret, cacheKey).finally(() => {
-      this.accessTokenRequests.delete(cacheKey);
-    });
-    this.accessTokenRequests.set(cacheKey, request);
-    return request;
-  }
-
-  private async loadAccessToken(appId: string, secret: string, cacheKey: string) {
-    const url = new URL('https://api.weixin.qq.com/cgi-bin/token');
-    url.searchParams.set('grant_type', 'client_credential');
-    url.searchParams.set('appid', appId);
-    url.searchParams.set('secret', secret);
-    const response = await this.fetchWechat(url, {}, 'Wechat access token request');
-    const body = await this.readWechatJson<WechatAccessToken>(response, 'Wechat access token request');
-    if (!response.ok || body.errcode || !body.access_token) {
-      throw new BadGatewayException(this.wechatApiError('Wechat access token request', response, body.errcode));
-    }
-    this.pruneAccessTokenCache();
-    this.accessTokenCache.set(cacheKey, {
-      token: body.access_token,
-      expiresAt: Date.now() + Math.max(60, body.expires_in ?? 7200) * 1000,
-    });
-    return body.access_token;
-  }
-
-  private async fetchWechat(input: string | URL, init: RequestInit, operation: string) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.wechatTimeoutMs());
     try {
-      return await fetch(input, { ...init, signal: controller.signal });
+      const bytes = await this.wechatApi.createUnlimitedQr({
+        scene,
+        page: 'pages/login/index',
+        envVersion,
+      });
+      return `data:image/png;base64,${bytes.toString('base64')}`;
     } catch (error) {
-      if (error instanceof Error && error.name === 'AbortError') {
-        throw new GatewayTimeoutException(`${operation} timed out`);
+      if (error instanceof WechatApiError) {
+        if (error.kind === 'configuration') throw new ServiceUnavailableException(error.safeMessage);
+        throw new BadGatewayException(error.safeMessage);
       }
-      throw new BadGatewayException(`${operation} could not reach Wechat`);
-    } finally {
-      clearTimeout(timeout);
+      throw error;
     }
   }
-
-  private async readWechatJson<T>(response: Response, operation: string) {
-    try {
-      return (await response.json()) as T;
-    } catch {
-      throw new BadGatewayException(`${operation} returned an invalid response`);
-    }
-  }
-
-  private wechatApiError(operation: string, response: Response, errorCode?: number) {
-    const detail = errorCode === undefined ? `HTTP ${response.status}` : `code ${errorCode}`;
-    return `${operation} failed (${detail})`;
-  }
-
-  private wechatTimeoutMs() {
-    const configured = Number(process.env.WECHAT_API_TIMEOUT_MS ?? DEFAULT_WECHAT_TIMEOUT_MS);
-    if (!Number.isFinite(configured)) return DEFAULT_WECHAT_TIMEOUT_MS;
-    return Math.min(30_000, Math.max(1_000, configured));
-  }
-
-  private accessTokenCacheKey(appId: string, secret: string) {
-    const secretFingerprint = createHash('sha256').update(secret).digest('hex');
-    return `${appId}:${secretFingerprint}`;
-  }
-
-  private pruneAccessTokenCache() {
-    const now = Date.now();
-    for (const [key, cached] of this.accessTokenCache) {
-      if (cached.expiresAt <= now) this.accessTokenCache.delete(key);
-    }
-    while (this.accessTokenCache.size >= 8) {
-      const oldestKey = this.accessTokenCache.keys().next().value as string | undefined;
-      if (!oldestKey) break;
-      this.accessTokenCache.delete(oldestKey);
-    }
-  }
-
   private async getActiveSession(scene: string) {
     const session = await this.prisma.wechatLoginSession.findUnique({ where: { scene } });
     if (!session) throw new NotFoundException('Wechat login session not found');

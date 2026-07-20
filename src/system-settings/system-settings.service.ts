@@ -1,6 +1,8 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { UpdateWechatPickupNotificationDto } from './dto/update-wechat-pickup-notification.dto';
+import { WECHAT_PICKUP_NOTIFICATION_KEY, normalizeWechatPickupNotification, pickupSettingResponse, validateWechatPickupNotification } from './wechat-pickup-notification';
 
 const OPTOMETRY_STYLE_KEY = 'optometry_style';
 const WECHAT_AUTH_KEY = 'wechat_auth';
@@ -75,11 +77,29 @@ export class SystemSettingsService {
     await this.prisma.$transaction(async (tx) => {
       await tx.systemSetting.upsert({
         where: { key: WECHAT_AUTH_KEY },
-        create: { key: WECHAT_AUTH_KEY, value: normalized as Prisma.InputJsonValue },
-        update: { value: normalized as Prisma.InputJsonValue },
+        create: { key: WECHAT_AUTH_KEY, value: normalized as unknown as Prisma.InputJsonValue },
+        update: { value: normalized as unknown as Prisma.InputJsonValue },
       });
     });
     return this.getWechatAuth();
+  }
+  async getWechatPickupNotification() {
+    const setting = await this.prisma.systemSetting.findUnique({ where: { key: WECHAT_PICKUP_NOTIFICATION_KEY } });
+    return pickupSettingResponse(normalizeWechatPickupNotification(setting?.value));
+  }
+
+  async updateWechatPickupNotification(dto: UpdateWechatPickupNotificationDto) {
+    const normalized = normalizeWechatPickupNotification(dto);
+    const validationErrors = validateWechatPickupNotification(normalized);
+    if (normalized.enabled && validationErrors.length > 0) {
+      throw new BadRequestException({ message: '取镜通知配置无效', validationErrors });
+    }
+    await this.prisma.systemSetting.upsert({
+      where: { key: WECHAT_PICKUP_NOTIFICATION_KEY },
+      create: { key: WECHAT_PICKUP_NOTIFICATION_KEY, value: normalized as unknown as Prisma.InputJsonValue },
+      update: { value: normalized as unknown as Prisma.InputJsonValue },
+    });
+    return pickupSettingResponse(normalized);
   }
   async getOptometryStyle() {
     const setting = await this.prisma.systemSetting.findUnique({
@@ -95,8 +115,8 @@ export class SystemSettingsService {
     const result = await this.prisma.$transaction(async (tx) => {
       const setting = await tx.systemSetting.upsert({
         where: { key: OPTOMETRY_STYLE_KEY },
-        create: { key: OPTOMETRY_STYLE_KEY, value: normalized as Prisma.InputJsonValue },
-        update: { value: normalized as Prisma.InputJsonValue },
+        create: { key: OPTOMETRY_STYLE_KEY, value: normalized as unknown as Prisma.InputJsonValue },
+        update: { value: normalized as unknown as Prisma.InputJsonValue },
       });
       return setting.value;
     });

@@ -6,6 +6,7 @@ import { createOrderNo } from '../common/order-number';
 import { tenantFilter } from '../common/tenant-scope';
 import { CurrentUser } from '../common/types/current-user';
 import { PrismaService } from '../prisma/prisma.service';
+import { PickupNotificationsService } from '../pickup-notifications/pickup-notifications.service';
 import { CreateFittingOrderDto } from './dto/create-fitting-order.dto';
 import { FittingOrderQueryDto } from './dto/fitting-order-query.dto';
 import { UpdateFittingOrderDto } from './dto/update-fitting-order.dto';
@@ -18,7 +19,10 @@ interface ResolvedProductSnapshot {
 
 @Injectable()
 export class FittingOrdersService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly pickupNotifications: PickupNotificationsService,
+  ) {}
 
   private decimal(value?: string | Prisma.Decimal | null): Prisma.Decimal {
     if (value instanceof Prisma.Decimal) return value;
@@ -98,18 +102,23 @@ export class FittingOrdersService {
             ],
           }
         : {}),
+      ...(query.readyAtFrom || query.readyAtTo
+        ? { readyForPickupAt: { ...(query.readyAtFrom ? { gte: new Date(query.readyAtFrom) } : {}), ...(query.readyAtTo ? { lte: new Date(query.readyAtTo) } : {}) } }
+        : {}),
+      ...this.notificationWhere(query.notificationStatus),
     };
     const [items, total] = await this.prisma.$transaction([
       this.prisma.fittingOrder.findMany({
         where,
-        include: { customer: true, optometryOrder: true },
+        include: { customer: true, optometryOrder: true, pickupScene: true, pickupSubscription: true, pickupNotificationTask: true },
         skip: (query.page - 1) * query.pageSize,
         take: query.pageSize,
         orderBy: { createdAt: 'desc' },
       }),
       this.prisma.fittingOrder.count({ where }),
     ]);
-    return toPageResult(items, total, query);
+    const settingState = await this.pickupNotifications.getSettingState();
+    return toPageResult(items.map((item) => this.pickupNotifications.toSafeOrder(item, settingState)), total, query);
   }
 
   async createForOptometryOrder(user: CurrentUser, optometryOrderId: string, dto: CreateFittingOrderDto) {
@@ -149,10 +158,11 @@ export class FittingOrdersService {
   async get(user: CurrentUser, id: string) {
     const order = await this.prisma.fittingOrder.findFirst({
       where: { id, ...tenantFilter(user), deletedAt: null },
-      include: { customer: true, optometryOrder: true, frameProductItem: true, lensProductItem: true, otherProductItem: true },
+      include: { customer: true, optometryOrder: true, frameProductItem: true, lensProductItem: true, otherProductItem: true, pickupScene: true, pickupSubscription: true, pickupNotificationTask: true },
     });
     if (!order) throw new NotFoundException('Fitting order not found');
-    return order;
+    const settingState = await this.pickupNotifications.getSettingState();
+    return this.pickupNotifications.toSafeOrder(order, settingState);
   }
 
   async update(user: CurrentUser, id: string, dto: UpdateFittingOrderDto) {
@@ -197,6 +207,22 @@ export class FittingOrdersService {
     return this.prisma.fittingOrder.update({ where: { id }, data: { deletedAt: new Date() } });
   }
 
+  private notificationWhere(status?: FittingOrderQueryDto['notificationStatus']): Prisma.FittingOrderWhereInput {
+    if (status === 'unsubscribed') return { pickupSubscription: { is: null } };
+    if (status === 'retrying') return { pickupNotificationTask: { is: { status: 'retrying' } } };
+    if (status === 'sent') return { pickupNotificationTask: { is: { status: 'sent' } } };
+    if (status === 'failed') return { pickupNotificationTask: { is: { status: 'failed' } } };
+    if (status === 'pending') {
+      return {
+        pickupSubscription: { isNot: null },
+        OR: [
+          { pickupNotificationTask: { is: null } },
+          { pickupNotificationTask: { is: { status: { in: ['pending', 'processing'] } } } },
+        ],
+      };
+    }
+    return {};
+  }
   async removeMany(user: CurrentUser, dto: BatchDeleteDto) {
     const ids = [...new Set(dto.ids)];
     const orders = await this.prisma.fittingOrder.findMany({

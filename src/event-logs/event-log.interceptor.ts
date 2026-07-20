@@ -6,7 +6,7 @@ import { EVENT_LOG_KEY, EventLogOptions } from './event-log.decorator';
 import { EventLogRequest } from './event-log-request';
 import { EventLogsService } from './event-logs.service';
 
-const SENSITIVE_FIELDS = /(password|secret|token|authorization|cookie|openid|session|raw)/i;
+const SENSITIVE_FIELDS = /(password|secret|token|authorization|cookie|openid|scene|touser|session|raw)/i;
 
 @Injectable()
 export class EventLogInterceptor implements NestInterceptor {
