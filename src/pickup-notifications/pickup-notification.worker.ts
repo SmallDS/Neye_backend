@@ -133,7 +133,7 @@ export class PickupNotificationWorker implements OnModuleInit, OnModuleDestroy {
         data: buildWechatPickupData(task.subscription.keywordMapping as unknown as PickupKeywordMapping[], {
           orderNo: task.fittingOrder.orderNo,
           storeName: task.tenant.name,
-          readyForPickupAt: task.fittingOrder.readyForPickupAt,
+          storePhone: task.tenant.contactPhone,
           pickupTip: task.subscription.pickupTip,
         }),
       });

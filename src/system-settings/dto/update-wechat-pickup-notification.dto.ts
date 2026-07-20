@@ -4,7 +4,7 @@ import { PICKUP_NOTIFICATION_SOURCES, PickupNotificationSource } from '../wechat
 
 export class WechatPickupKeywordMappingDto {
   @IsString()
-  @Matches(/^(?:thing|character_string|time|date|number)\d+$/)
+  @Matches(/^(?:thing|character_string|time|date|number|name|phone_number)\d+$/)
   keyword: string;
 
   @IsIn(PICKUP_NOTIFICATION_SOURCES)

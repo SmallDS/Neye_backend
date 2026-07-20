@@ -2,6 +2,7 @@ import { PickupNotificationTaskStatus } from '@prisma/client';
 import { randomBytes } from 'crypto';
 import { PickupKeywordMapping, WechatPickupNotificationSetting, validateWechatPickupNotification } from '../system-settings/wechat-pickup-notification';
 import { WechatSubscribeMessageData } from '../wechat/wechat-api.client';
+import { WechatApiError } from '../wechat/wechat-api.error';
 
 export type PickupNotificationStatus = 'failed' | 'pending' | 'retrying' | 'sent' | 'unsubscribed';
 export const PICKUP_NOTIFICATION_MAX_ATTEMPTS = 5;
@@ -79,22 +80,20 @@ export function projectPickupNotification(
   };
 }
 
-export function formatWechatPickupTime(value: Date) {
-  const parts = new Intl.DateTimeFormat('zh-CN', {
-    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false,
-  }).formatToParts(value);
-  const get = (type: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === type)?.value ?? '';
-  return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}`;
-}
-
 export function buildWechatPickupData(
   mapping: PickupKeywordMapping[],
-  values: { orderNo: string; storeName: string; readyForPickupAt: Date; pickupTip: string },
+  values: { orderNo: string; storeName: string; storePhone?: string | null; pickupTip: string },
 ): WechatSubscribeMessageData {
+  const storePhone = values.storePhone?.trim();
+  if (!storePhone) throw new WechatApiError('configuration', '门店联系电话未配置，无法发送取镜通知');
+  const storePhoneMapping = mapping.find((item) => item.source === 'store_phone');
+  if (!storePhoneMapping || !/^phone_number\d+$/.test(storePhoneMapping.keyword)) {
+    throw new WechatApiError('configuration', '门店电话关键词配置无效，必须使用 phone_numberXX');
+  }
   const sourceValues: Record<string, string> = {
     order_no: values.orderNo,
     store_name: values.storeName,
-    ready_for_pickup_at: formatWechatPickupTime(values.readyForPickupAt),
+    store_phone: storePhone,
     pickup_tip: values.pickupTip,
   };
   return Object.fromEntries(mapping.map((item) => [item.keyword, { value: sourceValues[item.source] }])) as WechatSubscribeMessageData;
