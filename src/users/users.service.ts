@@ -163,7 +163,8 @@ export class UsersService {
     return this.get(id);
   }
   private async ensureAnotherActiveAdmin(tx: Prisma.TransactionClient, excludedIds: string[]) {
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(74239001)`;
+    // The lock function returns PostgreSQL void, which Prisma cannot deserialize through $queryRaw.
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(74239001)`;
     const remaining = await tx.user.count({
       where: { role: UserRole.admin, status: UserStatus.active, id: { notIn: excludedIds } },
     });

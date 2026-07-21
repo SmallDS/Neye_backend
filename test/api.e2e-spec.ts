@@ -151,9 +151,10 @@ describe('NEye MVP API e2e', () => {
   const tenantAAccount = `e2e_ta_${suffix}`;
   const tenantBAccount = `e2e_tb_${suffix}`;
   const tenantAExtraAccount = `e2e_ta_extra_${suffix}`;
+  const demotedAdminAccount = `e2e_demoted_admin_${suffix}`;
   const tenantPassword = 'E2eTenant123456';
   const tenantIds: string[] = [];
-  const usernames = [systemUsername, tenantAAccount, tenantBAccount, tenantAExtraAccount];
+  const usernames = [systemUsername, tenantAAccount, tenantBAccount, tenantAExtraAccount, demotedAdminAccount];
   const frameInfo = `E2E Frame ${suffix}`;
 
   let app: INestApplication;
@@ -328,6 +329,23 @@ describe('NEye MVP API e2e', () => {
     expect(initialProfile.displayName).toBe('E2E Admin');
     expect(initialProfile.tenantId).toBeNull();
     expect(initialProfile.wechatBound).toBe(false);
+
+    const secondaryAdmin = await requestJson<AccountResponse>('/users', {
+      method: 'POST',
+      token: systemLogin.accessToken,
+      body: {
+        username: demotedAdminAccount,
+        password: tenantPassword,
+        displayName: 'E2E Demoted Admin',
+        role: 'admin',
+      },
+    });
+    const demotedAdmin = await requestJson<AccountResponse>(`/users/${secondaryAdmin.id}`, {
+      method: 'PATCH',
+      token: systemLogin.accessToken,
+      body: { role: 'staff' },
+    });
+    expect(demotedAdmin.role).toBe('staff');
 
     const publicWechatConfig = await requestJson<{
       enabled: boolean;
